@@ -140,7 +140,7 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
     return res.status(400).json({ error: 'Invalid dataset ID' });
   }
 
-  const viewName = `v_ds_${datasetId}`;
+  const viewName = `v_ds_${datasetId.replace(/-/g, '_')}`;
   const client = await pgPool.connect();
   try {
     const result = await client.query(`SELECT * FROM n8n_data."${viewName}" LIMIT 100000`);
