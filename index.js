@@ -2,6 +2,7 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
+const { Pool } = require('pg');
 
 const app = express();
 app.use(cors());
@@ -13,6 +14,14 @@ const N8N_API_KEY = process.env.N8N_API_KEY || '';
 
 if (!N8N_BASE) console.warn('N8N_BASE_URL not set; outgoing calls will fail.');
 if (!N8N_API_KEY) console.warn('N8N_API_KEY not set; some n8n endpoints may reject requests.');
+
+const pgPool = new Pool({
+  host: process.env.PG_HOST || 'postgres',
+  port: parseInt(process.env.PG_PORT || '5432', 10),
+  database: process.env.PG_DATABASE || 'n8n',
+  user: process.env.PG_USER,
+  password: process.env.PG_PASSWORD,
+});
 
 app.get('/mcp/skills', (req, res) => {
   res.json([
@@ -120,6 +129,29 @@ app.post('/mcp/execute', async (req, res) => {
     const message = err.message || 'request_failed';
     const details = err.response ? { status: err.response.status, data: err.response.data } : null;
     res.status(500).json({ error: message, details });
+  }
+});
+
+app.get('/dataset-view/:datasetId', async (req, res) => {
+  const { datasetId } = req.params;
+
+  // Validate to prevent SQL injection — dataset IDs are alphanumeric + hyphens only
+  if (!/^[a-zA-Z0-9_-]+$/.test(datasetId)) {
+    return res.status(400).json({ error: 'Invalid dataset ID' });
+  }
+
+  const viewName = `v_ds_${datasetId}`;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(`SELECT * FROM n8n_data."${viewName}" LIMIT 100000`);
+    const columns = result.fields.map(f => f.name);
+    const rows = result.rows;
+    res.json({ columns, rows });
+  } catch (err) {
+    console.error('dataset-view query error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
