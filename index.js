@@ -155,6 +155,141 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
   }
 });
 
+// ── Users ────────────────────────────────────────────────────────────────────
+
+app.get('/users', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'SELECT * FROM n8n_data.users WHERE user_email = $1 LIMIT 1', [email]
+    );
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    console.error('GET /users error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/users/:id', async (req, res) => {
+  const { id } = req.params;
+  const { password_hash, template_id } = req.body;
+  const fields = [], values = [];
+  if (password_hash !== undefined) { fields.push(`password_hash = $${fields.length + 1}`); values.push(password_hash); }
+  if (template_id   !== undefined) { fields.push(`template_id = $${fields.length + 1}`);   values.push(template_id); }
+  if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
+  values.push(id);
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE n8n_data.users SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING *`, values
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /users/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Conversations ─────────────────────────────────────────────────────────────
+
+app.get('/conversations', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'SELECT * FROM n8n_data.conversation_history WHERE user_email = $1 ORDER BY created_at DESC LIMIT 500',
+      [email]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /conversations error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/conversations', async (req, res) => {
+  const { user_email, prompt, response, ai_model, dataset_id, dataset_name,
+          duration_seconds, report_plan, report_id, created_at } = req.body;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO n8n_data.conversation_history
+         (user_email, prompt, response, ai_model, dataset_id, dataset_name,
+          duration_seconds, report_plan, report_id, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [user_email, prompt, response, ai_model, dataset_id, dataset_name,
+       duration_seconds ?? null, report_plan ?? null, report_id ?? null,
+       created_at || new Date().toISOString()]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /conversations error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/conversations/:id', async (req, res) => {
+  const { id } = req.params;
+  const { prompt, response } = req.body;
+  const fields = [], values = [];
+  if (prompt   !== undefined) { fields.push(`prompt = $${fields.length + 1}`);   values.push(prompt); }
+  if (response !== undefined) { fields.push(`response = $${fields.length + 1}`); values.push(response); }
+  if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
+  values.push(id);
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE n8n_data.conversation_history SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      values
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /conversations/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/conversations/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.conversation_history WHERE id = $1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /conversations/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Nav links & AI models ─────────────────────────────────────────────────────
+
+app.get('/nav-links', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query('SELECT * FROM n8n_data.nav_links ORDER BY "order" ASC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /nav-links error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.get('/ai-models', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query('SELECT * FROM n8n_data.ai_models');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /ai-models error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.get('/', (req, res) => res.send('mcp-n8n server running'));
 
 app.listen(PORT, () => console.log(`mcp-n8n listening on ${PORT}`));
