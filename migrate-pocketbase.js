@@ -64,10 +64,17 @@ async function pbFetchAll(token, collection) {
   const records = [];
   let page = 1;
   while (true) {
-    const res = await axios.get(`${PB_BASE}/api/collections/${collection}/records`, {
-      params: { page, perPage: 500, sort: '+created' },
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    let res;
+    try {
+      res = await axios.get(`${PB_BASE}/api/collections/${collection}/records`, {
+        params: { page, perPage: 500, sort: '+created' },
+        headers: { Authorization: `Bearer ${token}` },
+      });
+    } catch (err) {
+      const body = err.response?.data;
+      console.error(`  ✗ Failed fetching ${collection} page ${page}:`, JSON.stringify(body));
+      throw err;
+    }
     const { items, totalPages } = res.data;
     records.push(...items);
     if (page >= totalPages) break;
