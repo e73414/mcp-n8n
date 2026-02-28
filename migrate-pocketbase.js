@@ -11,10 +11,12 @@
 
 const path = require('path');
 const fs = require('fs');
-// Load .env from script directory, or fall back to parent directory
+// Load parent .env first (provides PB_* and PG_* vars), then local .env
+// (provides service-specific overrides). dotenv won't overwrite already-set vars.
 const localEnv = path.join(__dirname, '.env');
 const parentEnv = path.join(__dirname, '..', '.env');
-require('dotenv').config({ path: fs.existsSync(localEnv) ? localEnv : parentEnv });
+if (fs.existsSync(parentEnv)) require('dotenv').config({ path: parentEnv });
+if (fs.existsSync(localEnv))  require('dotenv').config({ path: localEnv });
 const axios = require('axios');
 const { Pool } = require('pg');
 
