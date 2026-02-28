@@ -66,7 +66,7 @@ async function pbFetchAll(token, collection) {
   while (true) {
     const res = await axios.get(`${PB_BASE}/api/collections/${collection}/records`, {
       params: { page, perPage: 500, sort: '+created' },
-      headers: { Authorization: token },
+      headers: { Authorization: `Bearer ${token}` },
     });
     const { items, totalPages } = res.data;
     records.push(...items);
