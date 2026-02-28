@@ -42,11 +42,21 @@ const pgPool = new Pool({
 // ── Pocketbase helpers ────────────────────────────────────────────────────────
 
 async function pbAdminAuth() {
-  const res = await axios.post(`${PB_BASE}/api/admins/auth-with-password`, {
-    identity: PB_EMAIL,
-    password: PB_PASSWORD,
-  });
-  return res.data.token;
+  // Try v0.22+ superusers endpoint first, fall back to legacy admins endpoint
+  const endpoints = [
+    `${PB_BASE}/api/superusers/auth-with-password`,
+    `${PB_BASE}/api/admins/auth-with-password`,
+  ];
+  let lastErr;
+  for (const url of endpoints) {
+    try {
+      const res = await axios.post(url, { identity: PB_EMAIL, password: PB_PASSWORD });
+      return res.data.token;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
 async function pbFetchAll(token, collection) {
