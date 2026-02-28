@@ -44,6 +44,7 @@ const pgPool = new Pool({
 async function pbAdminAuth() {
   // Try v0.22+ superusers endpoint first, fall back to legacy admins endpoint
   const endpoints = [
+    `${PB_BASE}/api/collections/_superusers/auth-with-password`,
     `${PB_BASE}/api/superusers/auth-with-password`,
     `${PB_BASE}/api/admins/auth-with-password`,
   ];
