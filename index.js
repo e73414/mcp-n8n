@@ -164,7 +164,7 @@ app.get('/datasets', async (req, res) => {
     const result = await client.query(`
       SELECT d.*
       FROM n8n_data.dataset_record_manager d
-      LEFT JOIN n8n_data.template_profiles tp ON tp.template_id = d.id::text
+      LEFT JOIN n8n_data.template_profiles tp ON tp.template_id = d.dataset_id::text
       WHERE
         $1 = 'admadmadm'
         OR

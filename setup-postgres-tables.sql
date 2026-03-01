@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS n8n_data.ai_models (
 -- ── Datasets ──────────────────────────────────────────────────────────────────
 -- Mirrors the production dataset_record_manager table structure.
 CREATE TABLE IF NOT EXISTS n8n_data.dataset_record_manager (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dataset_id   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   dataset_name TEXT NOT NULL,
   description  TEXT,
   owner_email  TEXT NOT NULL,
