@@ -189,6 +189,27 @@ app.get('/datasets', async (req, res) => {
 });
 
 // Returns all datasets from the dataset_record_manager table (all owners).
+// Update dataset owner_email — admin use.
+app.patch('/datasets/:datasetId', async (req, res) => {
+  const { datasetId } = req.params;
+  const { owner_email } = req.body;
+  if (!owner_email || typeof owner_email !== 'string') {
+    return res.status(400).json({ error: 'owner_email required' });
+  }
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE n8n_data.dataset_record_manager SET owner_email = $1, updated_at = now() WHERE dataset_id = $2 RETURNING dataset_id, owner_email`,
+      [owner_email.trim(), datasetId]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Dataset not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /datasets/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // Used by the admin Dataset Access Manager.
 app.get('/datasets/all', async (req, res) => {
   const client = await pgPool.connect();
