@@ -132,6 +132,28 @@ app.post('/mcp/execute', async (req, res) => {
   }
 });
 
+// ── Code generation helpers ───────────────────────────────────────────────────
+
+const RESERVED_CODES = ['adm', '000'];
+const ALPHA = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+
+function randomCode() {
+  let c = '';
+  for (let i = 0; i < 3; i++) c += ALPHA[Math.floor(Math.random() * ALPHA.length)];
+  return c;
+}
+
+async function uniqueCode(client, table, extraWhere = '', extraVals = []) {
+  for (let i = 0; i < 50; i++) {
+    const code = randomCode();
+    if (RESERVED_CODES.includes(code)) continue;
+    const q = `SELECT 1 FROM ${table} WHERE code=$1${extraWhere ? ' AND ' + extraWhere : ''} LIMIT 1`;
+    const r = await client.query(q, [code, ...extraVals]);
+    if (r.rows.length === 0) return code;
+  }
+  throw new Error('Could not generate unique code after 50 attempts');
+}
+
 app.get('/dataset-view/:datasetId', async (req, res) => {
   const { datasetId } = req.params;
 
@@ -174,10 +196,12 @@ app.get('/users', async (req, res) => {
 
 app.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { password_hash, template_id } = req.body;
+  const { password_hash, template_id, profile, user_timezone } = req.body;
   const fields = [], values = [];
-  if (password_hash !== undefined) { fields.push(`password_hash = $${fields.length + 1}`); values.push(password_hash); }
-  if (template_id   !== undefined) { fields.push(`template_id = $${fields.length + 1}`);   values.push(template_id); }
+  if (password_hash  !== undefined) { fields.push(`password_hash = $${fields.length + 1}`);  values.push(password_hash); }
+  if (template_id    !== undefined) { fields.push(`template_id = $${fields.length + 1}`);     values.push(template_id); }
+  if (profile        !== undefined) { fields.push(`profile = $${fields.length + 1}`);         values.push(profile); }
+  if (user_timezone  !== undefined) { fields.push(`user_timezone = $${fields.length + 1}`);   values.push(user_timezone); }
   if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
   values.push(id);
   const client = await pgPool.connect();
@@ -286,6 +310,271 @@ app.get('/ai-models', async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('GET /ai-models error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Admin: Companies ──────────────────────────────────────────────────────────
+
+app.get('/admin/companies', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query('SELECT * FROM n8n_data.profile_companies ORDER BY name ASC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /admin/companies error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/admin/companies', async (req, res) => {
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const client = await pgPool.connect();
+  try {
+    const code = await uniqueCode(client, 'n8n_data.profile_companies');
+    const result = await client.query(
+      'INSERT INTO n8n_data.profile_companies (name, code) VALUES ($1, $2) RETURNING *',
+      [name, code]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /admin/companies error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/admin/companies/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'UPDATE n8n_data.profile_companies SET name=$1 WHERE id=$2 RETURNING *',
+      [name, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /admin/companies/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/admin/companies/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.profile_companies WHERE id=$1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /admin/companies/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Admin: Business Units ─────────────────────────────────────────────────────
+
+app.get('/admin/business-units', async (req, res) => {
+  const { company_code } = req.query;
+  if (!company_code) return res.status(400).json({ error: 'company_code required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'SELECT * FROM n8n_data.profile_business_units WHERE company_code=$1 ORDER BY name ASC',
+      [company_code]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /admin/business-units error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/admin/business-units', async (req, res) => {
+  const { name, company_code } = req.body;
+  if (!name || !company_code) return res.status(400).json({ error: 'name and company_code required' });
+  const client = await pgPool.connect();
+  try {
+    const code = await uniqueCode(client, 'n8n_data.profile_business_units', 'company_code=$2', [company_code]);
+    const result = await client.query(
+      'INSERT INTO n8n_data.profile_business_units (name, code, company_code) VALUES ($1, $2, $3) RETURNING *',
+      [name, code, company_code]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /admin/business-units error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/admin/business-units/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'UPDATE n8n_data.profile_business_units SET name=$1 WHERE id=$2 RETURNING *',
+      [name, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /admin/business-units/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/admin/business-units/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.profile_business_units WHERE id=$1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /admin/business-units/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Admin: Teams ──────────────────────────────────────────────────────────────
+
+app.get('/admin/teams', async (req, res) => {
+  const { company_code, bu_code } = req.query;
+  if (!company_code || !bu_code) return res.status(400).json({ error: 'company_code and bu_code required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'SELECT * FROM n8n_data.profile_teams WHERE company_code=$1 AND bu_code=$2 ORDER BY name ASC',
+      [company_code, bu_code]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /admin/teams error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/admin/teams', async (req, res) => {
+  const { name, company_code, bu_code } = req.body;
+  if (!name || !company_code || !bu_code) return res.status(400).json({ error: 'name, company_code and bu_code required' });
+  const client = await pgPool.connect();
+  try {
+    const code = await uniqueCode(client, 'n8n_data.profile_teams', 'company_code=$2 AND bu_code=$3', [company_code, bu_code]);
+    const result = await client.query(
+      'INSERT INTO n8n_data.profile_teams (name, code, company_code, bu_code) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, code, company_code, bu_code]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /admin/teams error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/admin/teams/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name } = req.body;
+  if (!name) return res.status(400).json({ error: 'name required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'UPDATE n8n_data.profile_teams SET name=$1 WHERE id=$2 RETURNING *',
+      [name, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /admin/teams/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/admin/teams/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.profile_teams WHERE id=$1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /admin/teams/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Admin: Users ──────────────────────────────────────────────────────────────
+
+app.get('/admin/users', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query('SELECT * FROM n8n_data.users ORDER BY user_email ASC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /admin/users error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/admin/users', async (req, res) => {
+  const { user_email, password_hash, profile, user_timezone, template_id } = req.body;
+  if (!user_email) return res.status(400).json({ error: 'user_email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO n8n_data.users (user_email, password_hash, profile, user_timezone, template_id)
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [user_email, password_hash ?? null, profile ?? null, user_timezone ?? null, template_id ?? null]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /admin/users error:', err.message);
+    if (err.code === '23505') return res.status(409).json({ error: 'Email already exists' });
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/admin/users/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.users WHERE id=$1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /admin/users/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Admin: Template Profiles ──────────────────────────────────────────────────
+
+app.get('/admin/template-profiles', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query('SELECT * FROM n8n_data.template_profiles');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /admin/template-profiles error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.put('/admin/template-profiles/:template_id', async (req, res) => {
+  const { template_id } = req.params;
+  const { profile_code } = req.body;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO n8n_data.template_profiles (template_id, profile_code, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (template_id) DO UPDATE SET profile_code=EXCLUDED.profile_code, updated_at=now()
+       RETURNING *`,
+      [template_id, profile_code ?? null]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PUT /admin/template-profiles/:id error:', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
