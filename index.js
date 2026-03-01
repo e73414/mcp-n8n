@@ -154,8 +154,42 @@ async function uniqueCode(client, table, extraWhere = '', extraVals = []) {
   throw new Error('Could not generate unique code after 50 attempts');
 }
 
+// Returns datasets accessible to a specific user based on profile/email rules.
+// Rules: admin (admadmadm) sees all; no profile_code = owner only; profile_code = hierarchical match.
+app.get('/datasets', async (req, res) => {
+  const { email, profile } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(`
+      SELECT d.*
+      FROM n8n_data.dataset_record_manager d
+      LEFT JOIN n8n_data.template_profiles tp ON tp.template_id = d.id::text
+      WHERE
+        $1 = 'admadmadm'
+        OR
+        (tp.profile_code IS NULL AND d.owner_email = $2)
+        OR
+        (
+          tp.profile_code IS NOT NULL
+          AND $1 IS NOT NULL
+          AND TRIM(SUBSTRING(tp.profile_code::text, 1, 3)) = TRIM(SUBSTRING($1, 1, 3))
+          AND (TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = '000'
+               OR TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = TRIM(SUBSTRING($1, 4, 3)))
+          AND (TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = '000'
+               OR TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = TRIM(SUBSTRING($1, 7, 3)))
+        )
+      ORDER BY d.dataset_name ASC
+    `, [profile ?? null, email]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /datasets error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // Returns all datasets from the dataset_record_manager table (all owners).
-// Frontend is responsible for filtering by profile access.
+// Used by the admin Dataset Access Manager.
 app.get('/datasets/all', async (req, res) => {
   const client = await pgPool.connect();
   try {
