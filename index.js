@@ -160,7 +160,7 @@ app.get('/datasets/all', async (req, res) => {
   const client = await pgPool.connect();
   try {
     const result = await client.query(`
-      SELECT * FROM n8n_data.dataset_record_manager ORDER BY name ASC
+      SELECT * FROM n8n_data.dataset_record_manager
     `);
     res.json(result.rows);
   } catch (err) {
