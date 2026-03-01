@@ -44,6 +44,17 @@ CREATE TABLE IF NOT EXISTS n8n_data.ai_models (
   description TEXT
 );
 
+-- ── Datasets ──────────────────────────────────────────────────────────────────
+-- Mirrors the production dataset_record_manager table structure.
+CREATE TABLE IF NOT EXISTS n8n_data.dataset_record_manager (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dataset_name TEXT NOT NULL,
+  description  TEXT,
+  owner_email  TEXT NOT NULL,
+  created_at   TIMESTAMPTZ DEFAULT now(),
+  updated_at   TIMESTAMPTZ DEFAULT now()
+);
+
 -- ── Profile hierarchy ─────────────────────────────────────────────────────────
 -- Codes are 3-char mixed-case alphabetic. Reserved: 'adm' (admin), '000' (blank).
 -- Full user profile = company_code(3) + bu_code(3) + team_code(3) = 9 chars.
