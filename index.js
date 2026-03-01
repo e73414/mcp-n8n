@@ -154,6 +154,21 @@ async function uniqueCode(client, table, extraWhere = '', extraVals = []) {
   throw new Error('Could not generate unique code after 50 attempts');
 }
 
+// Returns all datasets from the dataset_record_manager table (all owners).
+// Frontend is responsible for filtering by profile access.
+app.get('/datasets/all', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(`
+      SELECT * FROM n8n_data.dataset_record_manager ORDER BY name ASC
+    `);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /datasets/all error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.get('/dataset-view/:datasetId', async (req, res) => {
   const { datasetId } = req.params;
 
