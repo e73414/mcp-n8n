@@ -307,16 +307,17 @@ app.get('/conversations', async (req, res) => {
 
 app.post('/conversations', async (req, res) => {
   const { user_email, prompt, response, ai_model, dataset_id, dataset_name,
-          duration_seconds, report_plan, report_id, created_at } = req.body;
+          duration_seconds, report_plan, report_id, detail_level, report_detail, created_at } = req.body;
   const client = await pgPool.connect();
   try {
     const result = await client.query(
       `INSERT INTO n8n_data.conversation_history
          (user_email, prompt, response, ai_model, dataset_id, dataset_name,
-          duration_seconds, report_plan, report_id, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+          duration_seconds, report_plan, report_id, detail_level, report_detail, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
       [user_email, prompt, response, ai_model, dataset_id, dataset_name,
        duration_seconds ?? null, report_plan ?? null, report_id ?? null,
+       detail_level ?? null, report_detail ?? null,
        created_at || new Date().toISOString()]
     );
     res.status(201).json(result.rows[0]);

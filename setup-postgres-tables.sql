@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS n8n_data.conversation_history (
   duration_seconds NUMERIC,
   report_plan      TEXT,
   report_id        TEXT,
+  detail_level     TEXT,
+  report_detail    TEXT,
   created_at       TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_conv_user_email ON n8n_data.conversation_history (user_email);
