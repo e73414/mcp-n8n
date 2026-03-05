@@ -162,7 +162,7 @@ app.get('/datasets', async (req, res) => {
   const client = await pgPool.connect();
   try {
     const result = await client.query(`
-      SELECT d.*
+      SELECT DISTINCT ON (d.dataset_id) d.*, tp.profile_code
       FROM n8n_data.dataset_record_manager d
       LEFT JOIN n8n_data.template_profiles tp ON tp.template_id = d.dataset_id::text
       WHERE
@@ -179,7 +179,7 @@ app.get('/datasets', async (req, res) => {
           AND (TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = '000'
                OR TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = TRIM(SUBSTRING($1, 7, 3)))
         )
-      ORDER BY d.dataset_name ASC
+      ORDER BY d.dataset_id
     `, [profile ?? null, email]);
     res.json(result.rows);
   } catch (err) {
