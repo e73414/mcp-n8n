@@ -210,6 +210,30 @@ app.patch('/datasets/:datasetId', async (req, res) => {
   } finally { client.release(); }
 });
 
+// Update sample_questions JSONB for a dataset.
+app.patch('/datasets/:datasetId/sample-questions', async (req, res) => {
+  const { datasetId } = req.params;
+  const { sample_questions } = req.body;
+  if (!sample_questions || typeof sample_questions !== 'object') {
+    return res.status(400).json({ error: 'sample_questions object required' });
+  }
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE n8n_data.dataset_record_manager
+       SET sample_questions = $1, updated_at = now()
+       WHERE dataset_id = $2
+       RETURNING dataset_id`,
+      [JSON.stringify(sample_questions), datasetId]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Dataset not found' });
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error('PATCH /datasets/:id/sample-questions error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // Used by the admin Dataset Access Manager.
 app.get('/datasets/all', async (req, res) => {
   const client = await pgPool.connect();

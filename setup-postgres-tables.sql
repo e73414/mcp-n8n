@@ -61,8 +61,11 @@ CREATE TABLE IF NOT EXISTS n8n_data.dataset_record_manager (
   updated_at           TIMESTAMPTZ DEFAULT now(),
   owner_email          TEXT NOT NULL,
   auth                 INTEGER,
-  dataset_desc         TEXT
+  dataset_desc         TEXT,
+  sample_questions     JSONB        -- { questions: [{ id: uuid, question: string }] }
 );
+-- On existing databases run:
+-- ALTER TABLE n8n_data.dataset_record_manager ADD COLUMN IF NOT EXISTS sample_questions JSONB;
 
 -- ── Profile hierarchy ─────────────────────────────────────────────────────────
 -- Codes are 3-char mixed-case alphabetic. Reserved: 'adm' (admin), '000' (blank).
