@@ -674,6 +674,38 @@ app.put('/admin/template-profiles/:template_id', async (req, res) => {
   } finally { client.release(); }
 });
 
+// ── App Settings ──────────────────────────────────────────────────────────────
+app.get('/app-settings', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query('SELECT key, value FROM n8n_data.app_settings');
+    const settings = {};
+    result.rows.forEach(r => { settings[r.key] = r.value; });
+    res.json(settings);
+  } catch (err) {
+    console.error('GET /app-settings error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.put('/app-settings/:key', async (req, res) => {
+  const { key } = req.params;
+  const { value } = req.body;
+  const client = await pgPool.connect();
+  try {
+    await client.query(
+      `INSERT INTO n8n_data.app_settings (key, value, updated_at)
+       VALUES ($1, $2, now())
+       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
+      [key, value || null]
+    );
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error('PUT /app-settings/:key error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.get('/', (req, res) => res.send('mcp-n8n server running'));
 
 app.listen(PORT, () => console.log(`mcp-n8n listening on ${PORT}`));

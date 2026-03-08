@@ -107,6 +107,24 @@ CREATE TABLE IF NOT EXISTS n8n_data.template_profiles (
   updated_at   TIMESTAMPTZ DEFAULT now()
 );
 
+-- ── App-wide admin settings ───────────────────────────────────────────────────
+-- Key-value store; one row per setting. NULL value = user-controlled (no admin override).
+-- Adding new settings never requires a schema change — just insert a new row.
+CREATE TABLE IF NOT EXISTS n8n_data.app_settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT,
+  updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+INSERT INTO n8n_data.app_settings (key, value) VALUES
+  ('analyze_model',   NULL),
+  ('plan_model',      NULL),
+  ('execute_model',   NULL),
+  ('chunk_threshold', NULL),
+  ('detail_level',    NULL),
+  ('report_detail',   NULL)
+ON CONFLICT (key) DO NOTHING;
+
 -- ── Admin navigation links ────────────────────────────────────────────────────
 -- Run once to add admin pages to the nav menu.
 -- Only admin users (profile = 'admadmadm') can access these routes.
@@ -114,5 +132,6 @@ INSERT INTO n8n_data.nav_links (name, path, "order", separator_before)
 VALUES
   ('Admin: Profiles',  '/admin/profiles',  100, true),
   ('Admin: Users',     '/admin/users',     101, false),
-  ('Admin: Templates', '/admin/templates', 102, false)
+  ('Admin: Templates', '/admin/templates', 102, false),
+  ('App Settings',     '/admin/settings',   95, true)
 ON CONFLICT DO NOTHING;
