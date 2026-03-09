@@ -8,6 +8,13 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));  // Increased limit for large CSV files
 
+const API_SECRET = process.env.API_SECRET || '';
+app.use((req, res, next) => {
+  if (!API_SECRET) return next(); // skip if not configured
+  if (req.headers['x-api-secret'] === API_SECRET) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+});
+
 const PORT = process.env.PORT || 3000;
 const N8N_BASE = process.env.N8N_BASE_URL || '';
 const N8N_API_KEY = process.env.N8N_API_KEY || '';
