@@ -164,8 +164,11 @@ async function uniqueCode(client, table, extraWhere = '', extraVals = []) {
 // Returns datasets accessible to a specific user based on profile/email rules.
 // Rules: admin (admadmadm) sees all; no profile_code = owner only; profile_code = hierarchical match.
 app.get('/datasets', async (req, res) => {
-  const { email, profile } = req.query;
+  const { email, profile, profiles } = req.query;
   if (!email) return res.status(400).json({ error: 'email required' });
+  const profilesArray = profiles
+    ? String(profiles).split(',').filter(p => p && p.trim().length === 9)
+    : [];
   const client = await pgPool.connect();
   try {
     const result = await client.query(`
@@ -179,15 +182,18 @@ app.get('/datasets', async (req, res) => {
         OR
         (
           tp.profile_code IS NOT NULL
-          AND $1 IS NOT NULL
-          AND TRIM(SUBSTRING(tp.profile_code::text, 1, 3)) = TRIM(SUBSTRING($1, 1, 3))
-          AND (TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = '000'
-               OR TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = TRIM(SUBSTRING($1, 4, 3)))
-          AND (TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = '000'
-               OR TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = TRIM(SUBSTRING($1, 7, 3)))
+          AND EXISTS (
+            SELECT 1 FROM unnest($3::text[]) AS up(user_profile)
+            WHERE
+              TRIM(SUBSTRING(tp.profile_code::text, 1, 3)) = TRIM(SUBSTRING(up.user_profile, 1, 3))
+              AND (TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = '000'
+                   OR TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = TRIM(SUBSTRING(up.user_profile, 4, 3)))
+              AND (TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = '000'
+                   OR TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = TRIM(SUBSTRING(up.user_profile, 7, 3)))
+          )
         )
       ORDER BY d.dataset_id
-    `, [profile ?? null, email]);
+    `, [profile ?? null, email, profilesArray]);
     res.json(result.rows);
   } catch (err) {
     console.error('GET /datasets error:', err.message);
@@ -288,7 +294,9 @@ app.get('/users', async (req, res) => {
     const result = await client.query(
       'SELECT * FROM n8n_data.users WHERE user_email = $1 LIMIT 1', [email]
     );
-    res.json(result.rows[0] || null);
+    const row = result.rows[0];
+    if (!row) return res.json(null);
+    res.json({ ...row, profiles: row.profiles || [] });
   } catch (err) {
     console.error('GET /users error:', err.message);
     res.status(500).json({ error: err.message });
@@ -297,12 +305,13 @@ app.get('/users', async (req, res) => {
 
 app.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { password_hash, template_id, profile, user_timezone } = req.body;
+  const { password_hash, template_id, profile, user_timezone, profiles } = req.body;
   const fields = [], values = [];
   if (password_hash  !== undefined) { fields.push(`password_hash = $${fields.length + 1}`);  values.push(password_hash); }
   if (template_id    !== undefined) { fields.push(`template_id = $${fields.length + 1}`);     values.push(template_id); }
   if (profile        !== undefined) { fields.push(`profile = $${fields.length + 1}`);         values.push(profile); }
   if (user_timezone  !== undefined) { fields.push(`user_timezone = $${fields.length + 1}`);   values.push(user_timezone); }
+  if (profiles       !== undefined) { fields.push(`profiles = $${fields.length + 1}`);        values.push(Array.isArray(profiles) ? profiles : []); }
   if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
   values.push(id);
   const client = await pgPool.connect();
@@ -612,7 +621,7 @@ app.get('/admin/users', async (req, res) => {
   const client = await pgPool.connect();
   try {
     const result = await client.query('SELECT * FROM n8n_data.users ORDER BY user_email ASC');
-    res.json(result.rows);
+    res.json(result.rows.map(r => ({ ...r, profiles: r.profiles || [] })));
   } catch (err) {
     console.error('GET /admin/users error:', err.message);
     res.status(500).json({ error: err.message });
@@ -620,14 +629,14 @@ app.get('/admin/users', async (req, res) => {
 });
 
 app.post('/admin/users', async (req, res) => {
-  const { user_email, password_hash, profile, user_timezone, template_id } = req.body;
+  const { user_email, password_hash, profile, user_timezone, template_id, profiles } = req.body;
   if (!user_email) return res.status(400).json({ error: 'user_email required' });
   const client = await pgPool.connect();
   try {
     const result = await client.query(
-      `INSERT INTO n8n_data.users (user_email, password_hash, profile, user_timezone, template_id)
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [user_email, password_hash ?? null, profile ?? null, user_timezone ?? null, template_id ?? null]
+      `INSERT INTO n8n_data.users (user_email, password_hash, profile, user_timezone, template_id, profiles)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [user_email, password_hash ?? null, profile ?? null, user_timezone ?? null, template_id ?? null, profiles ?? []]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
