@@ -305,8 +305,9 @@ app.get('/users', async (req, res) => {
 
 app.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { password_hash, template_id, profile, user_timezone, profiles } = req.body;
+  const { password_hash, template_id, profile, user_timezone, profiles, user_email } = req.body;
   const fields = [], values = [];
+  if (user_email     !== undefined) { fields.push(`user_email = $${fields.length + 1}`);      values.push(user_email); }
   if (password_hash  !== undefined) { fields.push(`password_hash = $${fields.length + 1}`);  values.push(password_hash); }
   if (template_id    !== undefined) { fields.push(`template_id = $${fields.length + 1}`);     values.push(template_id); }
   if (profile        !== undefined) { fields.push(`profile = $${fields.length + 1}`);         values.push(profile); }
