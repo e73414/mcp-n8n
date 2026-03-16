@@ -201,6 +201,25 @@ app.get('/datasets', async (req, res) => {
   } finally { client.release(); }
 });
 
+// Returns a single dataset row including sample_questions.
+app.get('/datasets/:datasetId', async (req, res) => {
+  const { datasetId } = req.params;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `SELECT dataset_id, dataset_name, sample_questions
+       FROM n8n_data.dataset_record_manager
+       WHERE dataset_id = $1`,
+      [datasetId]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Dataset not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('GET /datasets/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // Returns all datasets from the dataset_record_manager table (all owners).
 // Update dataset owner_email — admin use.
 app.patch('/datasets/:datasetId', async (req, res) => {
