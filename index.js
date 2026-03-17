@@ -742,6 +742,104 @@ app.put('/app-settings/:key', async (req, res) => {
   } finally { client.release(); }
 });
 
+// ── Saved Questions ───────────────────────────────────────────────────────────
+
+app.post('/saved-questions', async (req, res) => {
+  const { prompt, dataset_id, dataset_name, ai_model, editable, audience, owner_email } = req.body;
+  if (!prompt || !dataset_id || !dataset_name || !ai_model || !owner_email)
+    return res.status(400).json({ error: 'prompt, dataset_id, dataset_name, ai_model, owner_email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO n8n_data.saved_questions
+         (prompt, dataset_id, dataset_name, ai_model, editable, audience, owner_email)
+       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [prompt, dataset_id, dataset_name, ai_model, editable ?? true, audience ?? [], owner_email]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /saved-questions error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.get('/saved-questions', async (req, res) => {
+  const { email, all } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const q = all === 'true'
+      ? 'SELECT * FROM n8n_data.saved_questions ORDER BY created_at DESC'
+      : 'SELECT * FROM n8n_data.saved_questions WHERE owner_email=$1 ORDER BY created_at DESC';
+    const result = await client.query(q, all === 'true' ? [] : [email]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /saved-questions error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.get('/saved-questions/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query('SELECT * FROM n8n_data.saved_questions WHERE id=$1', [id]);
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('GET /saved-questions/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/saved-questions/:id', async (req, res) => {
+  const { id } = req.params;
+  const { prompt, editable, audience } = req.body;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE n8n_data.saved_questions
+       SET prompt=COALESCE($1,prompt), editable=COALESCE($2,editable),
+           audience=COALESCE($3,audience), updated_at=now()
+       WHERE id=$4 RETURNING *`,
+      [prompt ?? null, editable ?? null, audience ?? null, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /saved-questions/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/saved-questions/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.saved_questions WHERE id=$1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /saved-questions/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// User email search (for audience picker)
+app.get('/users/search', async (req, res) => {
+  const { q } = req.query;
+  if (!q || String(q).length < 2) return res.json([]);
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `SELECT user_email FROM n8n_data.users WHERE user_email ILIKE $1 LIMIT 10`,
+      [`%${q}%`]
+    );
+    res.json(result.rows.map(r => r.user_email));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.get('/', (req, res) => res.send('mcp-n8n server running'));
 
 app.listen(PORT, () => console.log(`mcp-n8n listening on ${PORT}`));

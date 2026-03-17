@@ -125,6 +125,22 @@ INSERT INTO n8n_data.app_settings (key, value) VALUES
   ('report_detail',   NULL)
 ON CONFLICT (key) DO NOTHING;
 
+-- ── Saved Questions ───────────────────────────────────────────────────────────
+-- Bookmarked prompts shareable via link. audience=NULL/empty means public link.
+CREATE TABLE IF NOT EXISTS n8n_data.saved_questions (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  prompt       TEXT NOT NULL,
+  dataset_id   TEXT NOT NULL,
+  dataset_name TEXT NOT NULL,
+  ai_model     TEXT NOT NULL,
+  editable     BOOLEAN NOT NULL DEFAULT true,
+  audience     TEXT[],          -- NULL/empty = anyone with link; set = restricted to those emails
+  owner_email  TEXT NOT NULL,
+  created_at   TIMESTAMPTZ DEFAULT now(),
+  updated_at   TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_saved_questions_owner ON n8n_data.saved_questions (owner_email);
+
 -- ── Admin navigation links ────────────────────────────────────────────────────
 -- Run once to add admin pages to the nav menu.
 -- Only admin users (profile = 'admadmadm') can access these routes.
