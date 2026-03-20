@@ -808,6 +808,35 @@ app.post('/saved-questions', async (req, res) => {
   } finally { client.release(); }
 });
 
+app.get('/saved-questions/browse', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const userResult = await client.query(
+      'SELECT profile FROM n8n_data.users WHERE user_email=$1', [email]
+    );
+    const userProfile = userResult.rows[0]?.profile?.trim();
+    const isAdmin = userProfile === 'admadmadm';
+    const result = isAdmin
+      ? await client.query(`
+          SELECT sq.*, u.profile as owner_profile
+          FROM n8n_data.saved_questions sq
+          LEFT JOIN n8n_data.users u ON u.user_email = sq.owner_email
+          ORDER BY sq.owner_email, sq.created_at DESC`)
+      : await client.query(`
+          SELECT sq.*, u.profile as owner_profile
+          FROM n8n_data.saved_questions sq
+          LEFT JOIN n8n_data.users u ON u.user_email = sq.owner_email
+          WHERE cardinality(sq.audience) = 0 OR $1 = ANY(sq.audience)
+          ORDER BY sq.owner_email, sq.created_at DESC`, [email]);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /saved-questions/browse error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.get('/saved-questions', async (req, res) => {
   const { email, all } = req.query;
   if (!email) return res.status(400).json({ error: 'email required' });
