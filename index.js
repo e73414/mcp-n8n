@@ -303,6 +303,51 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
   }
 });
 
+app.get('/datasets/:datasetId/download-csv', async (req, res) => {
+  const { datasetId } = req.params;
+  if (!/^[a-zA-Z0-9_-]+$/.test(datasetId)) return res.status(400).json({ error: 'Invalid dataset ID' });
+
+  const viewName = `v_ds_${datasetId.replace(/-/g, '_')}`;
+  const client = await pgPool.connect();
+  try {
+    const metaResult = await client.query(
+      `SELECT column_mapping, dataset_name FROM n8n_data.dataset_record_manager WHERE dataset_id=$1`,
+      [datasetId]
+    );
+    if (metaResult.rowCount === 0) return res.status(404).json({ error: 'Dataset not found' });
+
+    const { column_mapping, dataset_name } = metaResult.rows[0];
+    const dbToOriginal = {};
+    if (column_mapping) {
+      const mapping = typeof column_mapping === 'string' ? JSON.parse(column_mapping) : column_mapping;
+      Object.entries(mapping).forEach(([orig, db]) => { dbToOriginal[db] = orig; });
+    }
+
+    const result = await client.query(`SELECT * FROM n8n_data."${viewName}"`);
+    const dbColumns = result.fields.map(f => f.name);
+    const headers = dbColumns.map(col => dbToOriginal[col] || col);
+
+    const escape = (val) => {
+      const str = (val === null || val === undefined) ? '' : String(val);
+      return (str.includes(',') || str.includes('"') || str.includes('\n'))
+        ? `"${str.replace(/"/g, '""')}"` : str;
+    };
+
+    const csvRows = [
+      headers.map(escape).join(','),
+      ...result.rows.map(row => dbColumns.map(col => escape(row[col])).join(','))
+    ];
+
+    const filename = (dataset_name || datasetId).replace(/[^a-zA-Z0-9_\- ]/g, '_');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
+    res.send(csvRows.join('\n'));
+  } catch (err) {
+    console.error('GET /datasets/:id/download-csv error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // ── Users ────────────────────────────────────────────────────────────────────
 
 app.get('/users', async (req, res) => {
