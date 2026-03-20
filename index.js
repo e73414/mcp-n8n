@@ -8,9 +8,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));  // Increased limit for large CSV files
 
-const API_SECRET = process.env.API_SECRET || '';
+const API_SECRET = process.env.API_SECRET;
+if (!API_SECRET) {
+  console.error('FATAL: API_SECRET environment variable is not set. Refusing to start.');
+  process.exit(1);
+}
 app.use((req, res, next) => {
-  if (!API_SECRET) return next(); // skip if not configured
   if (req.headers['x-api-secret'] === API_SECRET) return next();
   res.status(401).json({ error: 'Unauthorized' });
 });
@@ -29,6 +32,53 @@ const pgPool = new Pool({
   user: process.env.PG_USER,
   password: process.env.PG_PASSWORD,
 });
+
+// ── Authorization helpers ─────────────────────────────────────────────────────
+
+async function getUserAuth(client, email) {
+  const r = await client.query(
+    'SELECT id, profile, profiles FROM n8n_data.users WHERE user_email=$1', [email]
+  );
+  if (r.rowCount === 0) return null;
+  const { id, profile, profiles } = r.rows[0];
+  return {
+    id,
+    profile: profile ?? null,
+    profilesArray: Array.isArray(profiles) ? profiles.filter(p => p && p.trim().length === 9) : [],
+  };
+}
+
+async function isAdmin(email, client) {
+  const r = await client.query('SELECT profile FROM n8n_data.users WHERE user_email=$1', [email]);
+  return r.rows[0]?.profile?.trim() === 'admadmadm';
+}
+
+async function canAccessDataset(client, email, datasetId) {
+  const auth = await getUserAuth(client, email);
+  if (!auth) return false;
+  const { profile, profilesArray } = auth;
+  if (profile?.trim() === 'admadmadm') return true;
+  const r = await client.query(`
+    SELECT 1 FROM n8n_data.dataset_record_manager d
+    LEFT JOIN n8n_data.template_profiles tp ON tp.template_id = d.dataset_id::text
+    WHERE d.dataset_id = $1 AND (
+      (tp.profile_code IS NULL AND d.owner_email = $2)
+      OR (
+        tp.profile_code IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM unnest($3::text[]) AS up(user_profile)
+          WHERE
+            TRIM(SUBSTRING(tp.profile_code::text, 1, 3)) = TRIM(SUBSTRING(up.user_profile, 1, 3))
+            AND (TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = '000'
+                 OR TRIM(SUBSTRING(tp.profile_code::text, 4, 3)) = TRIM(SUBSTRING(up.user_profile, 4, 3)))
+            AND (TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = '000'
+                 OR TRIM(SUBSTRING(tp.profile_code::text, 7, 3)) = TRIM(SUBSTRING(up.user_profile, 7, 3)))
+        )
+      )
+    )
+  `, [datasetId, email, profilesArray]);
+  return r.rowCount > 0;
+}
 
 app.get('/mcp/skills', (req, res) => {
   res.json([
@@ -163,14 +213,15 @@ async function uniqueCode(client, table, extraWhere = '', extraVals = []) {
 
 // Returns datasets accessible to a specific user based on profile/email rules.
 // Rules: admin (admadmadm) sees all; no profile_code = owner only; profile_code = hierarchical match.
+// Profile is looked up server-side — client-supplied profile params are ignored.
 app.get('/datasets', async (req, res) => {
-  const { email, profile, profiles } = req.query;
+  const { email } = req.query;
   if (!email) return res.status(400).json({ error: 'email required' });
-  const profilesArray = profiles
-    ? String(profiles).split(',').filter(p => p && p.trim().length === 9)
-    : [];
   const client = await pgPool.connect();
   try {
+    const auth = await getUserAuth(client, email);
+    if (!auth) return res.status(403).json({ error: 'User not found' });
+    const { profile, profilesArray } = auth;
     const result = await client.query(`
       SELECT DISTINCT ON (d.dataset_id) d.*, tp.profile_code
       FROM n8n_data.dataset_record_manager d
@@ -282,6 +333,8 @@ app.get('/datasets/all', async (req, res) => {
 
 app.get('/dataset-view/:datasetId', async (req, res) => {
   const { datasetId } = req.params;
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
 
   // Validate to prevent SQL injection — dataset IDs are alphanumeric + hyphens only
   if (!/^[a-zA-Z0-9_-]+$/.test(datasetId)) {
@@ -291,6 +344,8 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
   const viewName = `v_ds_${datasetId.replace(/-/g, '_')}`;
   const client = await pgPool.connect();
   try {
+    if (!(await canAccessDataset(client, email, datasetId)))
+      return res.status(403).json({ error: 'Forbidden' });
     const result = await client.query(`SELECT * FROM n8n_data."${viewName}" LIMIT 100000`);
     const columns = result.fields.map(f => f.name);
     const rows = result.rows;
@@ -305,11 +360,15 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
 
 app.get('/datasets/:datasetId/download-csv', async (req, res) => {
   const { datasetId } = req.params;
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
   if (!/^[a-zA-Z0-9_-]+$/.test(datasetId)) return res.status(400).json({ error: 'Invalid dataset ID' });
 
   const viewName = `v_ds_${datasetId.replace(/-/g, '_')}`;
   const client = await pgPool.connect();
   try {
+    if (!(await canAccessDataset(client, email, datasetId)))
+      return res.status(403).json({ error: 'Forbidden' });
     const metaResult = await client.query(
       `SELECT column_mapping, dataset_name FROM n8n_data.dataset_record_manager WHERE dataset_id=$1`,
       [datasetId]
@@ -369,18 +428,28 @@ app.get('/users', async (req, res) => {
 
 app.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { password_hash, template_id, profile, user_timezone, profiles, user_email } = req.body;
-  const fields = [], values = [];
-  if (user_email     !== undefined) { fields.push(`user_email = $${fields.length + 1}`);      values.push(user_email); }
-  if (password_hash  !== undefined) { fields.push(`password_hash = $${fields.length + 1}`);  values.push(password_hash); }
-  if (template_id    !== undefined) { fields.push(`template_id = $${fields.length + 1}`);     values.push(template_id); }
-  if (profile        !== undefined) { fields.push(`profile = $${fields.length + 1}`);         values.push(profile); }
-  if (user_timezone  !== undefined) { fields.push(`user_timezone = $${fields.length + 1}`);   values.push(user_timezone); }
-  if (profiles       !== undefined) { fields.push(`profiles = $${fields.length + 1}`);        values.push(Array.isArray(profiles) ? profiles : []); }
-  if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
-  values.push(id);
+  const { password_hash, template_id, profile, user_timezone, profiles, user_email, actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    const actor = await getUserAuth(client, actor_email);
+    if (!actor) return res.status(403).json({ error: 'Unauthorized' });
+    const actorIsAdmin = actor.profile?.trim() === 'admadmadm';
+    // Non-admin can only modify their own record and may not touch profile/profiles/user_email
+    if (!actorIsAdmin) {
+      if (actor.id !== id) return res.status(403).json({ error: 'Forbidden' });
+      if (profile !== undefined || profiles !== undefined || user_email !== undefined)
+        return res.status(403).json({ error: 'Admin only: cannot change profile or email' });
+    }
+    const fields = [], values = [];
+    if (user_email     !== undefined) { fields.push(`user_email = $${fields.length + 1}`);      values.push(user_email); }
+    if (password_hash  !== undefined) { fields.push(`password_hash = $${fields.length + 1}`);  values.push(password_hash); }
+    if (template_id    !== undefined) { fields.push(`template_id = $${fields.length + 1}`);     values.push(template_id); }
+    if (profile        !== undefined) { fields.push(`profile = $${fields.length + 1}`);         values.push(profile); }
+    if (user_timezone  !== undefined) { fields.push(`user_timezone = $${fields.length + 1}`);   values.push(user_timezone); }
+    if (profiles       !== undefined) { fields.push(`profiles = $${fields.length + 1}`);        values.push(Array.isArray(profiles) ? profiles : []); }
+    if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
+    values.push(id);
     const result = await client.query(
       `UPDATE n8n_data.users SET ${fields.join(', ')} WHERE id = $${values.length} RETURNING *`, values
     );
@@ -480,10 +549,12 @@ app.get('/nav-links', async (req, res) => {
 });
 
 app.post('/nav-links', async (req, res) => {
-  const { name, path, order, color, separator_before } = req.body;
+  const { name, path, order, color, separator_before, actor_email } = req.body;
   if (!name || !path) return res.status(400).json({ error: 'name and path required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       `INSERT INTO n8n_data.nav_links (name, path, "order", color, separator_before)
        VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -498,9 +569,11 @@ app.post('/nav-links', async (req, res) => {
 
 app.patch('/nav-links/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, path, order, color, separator_before } = req.body;
+  const { name, path, order, color, separator_before, actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       `UPDATE n8n_data.nav_links
        SET name=COALESCE($1,name), path=COALESCE($2,path), "order"=COALESCE($3,"order"),
@@ -518,8 +591,11 @@ app.patch('/nav-links/:id', async (req, res) => {
 
 app.delete('/nav-links/:id', async (req, res) => {
   const { id } = req.params;
+  const { actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     await client.query('DELETE FROM n8n_data.nav_links WHERE id=$1', [id]);
     res.status(204).send();
   } catch (err) {
@@ -540,10 +616,12 @@ app.get('/ai-models', async (req, res) => {
 });
 
 app.post('/ai-models', async (req, res) => {
-  const { model_id, name, provider, description, display_order } = req.body;
+  const { model_id, name, provider, description, display_order, actor_email } = req.body;
   if (!model_id || !name) return res.status(400).json({ error: 'model_id and name required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       `INSERT INTO n8n_data.ai_models (model_id, name, provider, description, display_order)
        VALUES ($1,$2,$3,$4,$5) RETURNING *`,
@@ -558,9 +636,11 @@ app.post('/ai-models', async (req, res) => {
 
 app.patch('/ai-models/:id', async (req, res) => {
   const { id } = req.params;
-  const { model_id, name, provider, description, display_order } = req.body;
+  const { model_id, name, provider, description, display_order, actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       `UPDATE n8n_data.ai_models
        SET model_id=COALESCE($1,model_id), name=COALESCE($2,name),
@@ -578,8 +658,11 @@ app.patch('/ai-models/:id', async (req, res) => {
 
 app.delete('/ai-models/:id', async (req, res) => {
   const { id } = req.params;
+  const { actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     await client.query('DELETE FROM n8n_data.ai_models WHERE id=$1', [id]);
     res.status(204).send();
   } catch (err) {
@@ -602,10 +685,12 @@ app.get('/admin/companies', async (req, res) => {
 });
 
 app.post('/admin/companies', async (req, res) => {
-  const { name } = req.body;
+  const { name, actor_email } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const code = await uniqueCode(client, 'n8n_data.profile_companies');
     const result = await client.query(
       'INSERT INTO n8n_data.profile_companies (name, code) VALUES ($1, $2) RETURNING *',
@@ -620,10 +705,12 @@ app.post('/admin/companies', async (req, res) => {
 
 app.patch('/admin/companies/:id', async (req, res) => {
   const { id } = req.params;
-  const { name } = req.body;
+  const { name, actor_email } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       'UPDATE n8n_data.profile_companies SET name=$1 WHERE id=$2 RETURNING *',
       [name, id]
@@ -638,8 +725,11 @@ app.patch('/admin/companies/:id', async (req, res) => {
 
 app.delete('/admin/companies/:id', async (req, res) => {
   const { id } = req.params;
+  const { actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     await client.query('DELETE FROM n8n_data.profile_companies WHERE id=$1', [id]);
     res.status(204).send();
   } catch (err) {
@@ -667,10 +757,12 @@ app.get('/admin/business-units', async (req, res) => {
 });
 
 app.post('/admin/business-units', async (req, res) => {
-  const { name, company_code } = req.body;
+  const { name, company_code, actor_email } = req.body;
   if (!name || !company_code) return res.status(400).json({ error: 'name and company_code required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const code = await uniqueCode(client, 'n8n_data.profile_business_units', 'company_code=$2', [company_code]);
     const result = await client.query(
       'INSERT INTO n8n_data.profile_business_units (name, code, company_code) VALUES ($1, $2, $3) RETURNING *',
@@ -685,10 +777,12 @@ app.post('/admin/business-units', async (req, res) => {
 
 app.patch('/admin/business-units/:id', async (req, res) => {
   const { id } = req.params;
-  const { name } = req.body;
+  const { name, actor_email } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       'UPDATE n8n_data.profile_business_units SET name=$1 WHERE id=$2 RETURNING *',
       [name, id]
@@ -703,8 +797,11 @@ app.patch('/admin/business-units/:id', async (req, res) => {
 
 app.delete('/admin/business-units/:id', async (req, res) => {
   const { id } = req.params;
+  const { actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     await client.query('DELETE FROM n8n_data.profile_business_units WHERE id=$1', [id]);
     res.status(204).send();
   } catch (err) {
@@ -732,10 +829,12 @@ app.get('/admin/teams', async (req, res) => {
 });
 
 app.post('/admin/teams', async (req, res) => {
-  const { name, company_code, bu_code } = req.body;
+  const { name, company_code, bu_code, actor_email } = req.body;
   if (!name || !company_code || !bu_code) return res.status(400).json({ error: 'name, company_code and bu_code required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const code = await uniqueCode(client, 'n8n_data.profile_teams', 'company_code=$2 AND bu_code=$3', [company_code, bu_code]);
     const result = await client.query(
       'INSERT INTO n8n_data.profile_teams (name, code, company_code, bu_code) VALUES ($1, $2, $3, $4) RETURNING *',
@@ -750,10 +849,12 @@ app.post('/admin/teams', async (req, res) => {
 
 app.patch('/admin/teams/:id', async (req, res) => {
   const { id } = req.params;
-  const { name } = req.body;
+  const { name, actor_email } = req.body;
   if (!name) return res.status(400).json({ error: 'name required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       'UPDATE n8n_data.profile_teams SET name=$1 WHERE id=$2 RETURNING *',
       [name, id]
@@ -768,8 +869,11 @@ app.patch('/admin/teams/:id', async (req, res) => {
 
 app.delete('/admin/teams/:id', async (req, res) => {
   const { id } = req.params;
+  const { actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     await client.query('DELETE FROM n8n_data.profile_teams WHERE id=$1', [id]);
     res.status(204).send();
   } catch (err) {
@@ -781,8 +885,11 @@ app.delete('/admin/teams/:id', async (req, res) => {
 // ── Admin: Users ──────────────────────────────────────────────────────────────
 
 app.get('/admin/users', async (req, res) => {
+  const { actor_email } = req.query;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query('SELECT * FROM n8n_data.users ORDER BY user_email ASC');
     res.json(result.rows.map(r => ({ ...r, profiles: r.profiles || [] })));
   } catch (err) {
@@ -792,10 +899,12 @@ app.get('/admin/users', async (req, res) => {
 });
 
 app.post('/admin/users', async (req, res) => {
-  const { user_email, password_hash, profile, user_timezone, template_id, profiles } = req.body;
+  const { user_email, password_hash, profile, user_timezone, template_id, profiles, actor_email } = req.body;
   if (!user_email) return res.status(400).json({ error: 'user_email required' });
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     const result = await client.query(
       `INSERT INTO n8n_data.users (user_email, password_hash, profile, user_timezone, template_id, profiles)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
@@ -811,8 +920,11 @@ app.post('/admin/users', async (req, res) => {
 
 app.delete('/admin/users/:id', async (req, res) => {
   const { id } = req.params;
+  const { actor_email } = req.body;
+  if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
+    if (!(await isAdmin(actor_email, client))) return res.status(403).json({ error: 'Admin only' });
     await client.query('DELETE FROM n8n_data.users WHERE id=$1', [id]);
     res.status(204).send();
   } catch (err) {
