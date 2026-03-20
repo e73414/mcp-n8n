@@ -479,13 +479,111 @@ app.get('/nav-links', async (req, res) => {
   } finally { client.release(); }
 });
 
+app.post('/nav-links', async (req, res) => {
+  const { name, path, order, color, separator_before } = req.body;
+  if (!name || !path) return res.status(400).json({ error: 'name and path required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO n8n_data.nav_links (name, path, "order", color, separator_before)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [name, path, order ?? 0, color ?? null, separator_before ?? false]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /nav-links error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/nav-links/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, path, order, color, separator_before } = req.body;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE n8n_data.nav_links
+       SET name=COALESCE($1,name), path=COALESCE($2,path), "order"=COALESCE($3,"order"),
+           color=$4, separator_before=COALESCE($5,separator_before)
+       WHERE id=$6 RETURNING *`,
+      [name ?? null, path ?? null, order ?? null, color ?? null, separator_before ?? null, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /nav-links/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/nav-links/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.nav_links WHERE id=$1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /nav-links/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.get('/ai-models', async (req, res) => {
   const client = await pgPool.connect();
   try {
-    const result = await client.query('SELECT * FROM n8n_data.ai_models');
+    const result = await client.query('SELECT * FROM n8n_data.ai_models ORDER BY display_order ASC, name ASC');
     res.json(result.rows);
   } catch (err) {
     console.error('GET /ai-models error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/ai-models', async (req, res) => {
+  const { model_id, name, provider, description, display_order } = req.body;
+  if (!model_id || !name) return res.status(400).json({ error: 'model_id and name required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO n8n_data.ai_models (model_id, name, provider, description, display_order)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [model_id, name, provider ?? null, description ?? null, display_order ?? 0]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /ai-models error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/ai-models/:id', async (req, res) => {
+  const { id } = req.params;
+  const { model_id, name, provider, description, display_order } = req.body;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `UPDATE n8n_data.ai_models
+       SET model_id=COALESCE($1,model_id), name=COALESCE($2,name),
+           provider=$3, description=$4, display_order=COALESCE($5,display_order)
+       WHERE id=$6 RETURNING *`,
+      [model_id ?? null, name ?? null, provider ?? null, description ?? null, display_order ?? null, id]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('PATCH /ai-models/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/ai-models/:id', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.ai_models WHERE id=$1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /ai-models/:id error:', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });

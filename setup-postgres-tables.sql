@@ -39,12 +39,15 @@ CREATE TABLE IF NOT EXISTS n8n_data.nav_links (
 );
 
 CREATE TABLE IF NOT EXISTS n8n_data.ai_models (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  model_id    TEXT NOT NULL,
-  name        TEXT NOT NULL,
-  provider    TEXT,
-  description TEXT
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  model_id      TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  provider      TEXT,
+  description   TEXT,
+  display_order INTEGER NOT NULL DEFAULT 0
 );
+-- Migration for existing installs:
+ALTER TABLE n8n_data.ai_models ADD COLUMN IF NOT EXISTS display_order INTEGER NOT NULL DEFAULT 0;
 
 -- ── Datasets ──────────────────────────────────────────────────────────────────
 -- Mirrors the production dataset_record_manager table structure.
