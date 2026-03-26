@@ -144,6 +144,59 @@ CREATE TABLE IF NOT EXISTS n8n_data.saved_questions (
 );
 CREATE INDEX IF NOT EXISTS idx_saved_questions_owner ON n8n_data.saved_questions (owner_email);
 
+-- ── Automated Ingestion Pipeline ─────────────────────────────────────────────
+
+-- Stores the CsvOptimizerPlus transformation config for a dataset
+CREATE TABLE IF NOT EXISTS n8n_data.dataset_ingestion_config (
+  dataset_id   TEXT PRIMARY KEY,
+  config       JSONB NOT NULL,
+  source_type  TEXT DEFAULT 'excel',   -- 'excel' | 'csv'
+  created_at   TIMESTAMPTZ DEFAULT now(),
+  updated_at   TIMESTAMPTZ DEFAULT now()
+);
+
+-- Per-dataset ingestion schedule and Google Drive source folder
+CREATE TABLE IF NOT EXISTS n8n_data.dataset_ingestion_schedule (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dataset_id       TEXT NOT NULL UNIQUE,
+  owner_email      TEXT NOT NULL,
+  folder_id        TEXT NOT NULL,       -- Google Drive folder ID
+  location_type    TEXT DEFAULT 'google_drive',
+  schedule         TEXT,                -- cron expression, NULL = manual only
+  enabled          BOOLEAN DEFAULT true,
+  last_run_at      TIMESTAMPTZ,
+  last_run_status  TEXT,                -- 'success' | 'fail' | 'no_new_file'
+  created_at       TIMESTAMPTZ DEFAULT now(),
+  updated_at       TIMESTAMPTZ DEFAULT now()
+);
+
+-- Audit log of every file ingested (or attempted)
+CREATE TABLE IF NOT EXISTS n8n_data.dataset_ingestion_files (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  dataset_id       TEXT NOT NULL,
+  file_name        TEXT,
+  file_id          TEXT,                -- Google Drive file ID
+  file_location    TEXT,                -- folder ID
+  location_type    TEXT DEFAULT 'google_drive',
+  ingested_at      TIMESTAMPTZ,
+  ingestion_result TEXT,               -- 'success' | 'fail' | 'no_new_file'
+  error_message    TEXT,
+  rows_inserted    INTEGER,
+  created_at       TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ingestion_files_dataset ON n8n_data.dataset_ingestion_files (dataset_id);
+CREATE INDEX IF NOT EXISTS idx_ingestion_files_file_id  ON n8n_data.dataset_ingestion_files (file_id);
+
+-- Per-user Google OAuth tokens (access + refresh)
+CREATE TABLE IF NOT EXISTS n8n_data.google_oauth_tokens (
+  user_email    TEXT PRIMARY KEY,
+  access_token  TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  token_expiry  TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ DEFAULT now(),
+  updated_at    TIMESTAMPTZ DEFAULT now()
+);
+
 -- ── Admin navigation links ────────────────────────────────────────────────────
 -- Run once to add admin pages to the nav menu.
 -- Only admin users (profile = 'admadmadm') can access these routes.
