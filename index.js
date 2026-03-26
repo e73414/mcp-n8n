@@ -262,6 +262,18 @@ app.get('/datasets', async (req, res) => {
   } finally { client.release(); }
 });
 
+// Used by the admin Dataset Access Manager — must be before /:datasetId to avoid route shadowing.
+app.get('/datasets/all', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(`SELECT * FROM n8n_data.dataset_record_manager`);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /datasets/all error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // Returns a single dataset row including sample_questions.
 app.get('/datasets/:datasetId', async (req, res) => {
   const { datasetId } = req.params;
@@ -323,20 +335,6 @@ app.patch('/datasets/:datasetId/sample-questions', async (req, res) => {
     res.json({ status: 'ok' });
   } catch (err) {
     console.error('PATCH /datasets/:id/sample-questions error:', err.message);
-    res.status(500).json({ error: err.message });
-  } finally { client.release(); }
-});
-
-// Used by the admin Dataset Access Manager.
-app.get('/datasets/all', async (req, res) => {
-  const client = await pgPool.connect();
-  try {
-    const result = await client.query(`
-      SELECT * FROM n8n_data.dataset_record_manager
-    `);
-    res.json(result.rows);
-  } catch (err) {
-    console.error('GET /datasets/all error:', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
