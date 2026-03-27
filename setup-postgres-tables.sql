@@ -197,6 +197,16 @@ CREATE TABLE IF NOT EXISTS n8n_data.google_oauth_tokens (
   updated_at    TIMESTAMPTZ DEFAULT now()
 );
 
+-- Per-user Microsoft OAuth tokens for OneDrive access
+CREATE TABLE IF NOT EXISTS n8n_data.microsoft_oauth_tokens (
+  user_email    TEXT PRIMARY KEY,
+  access_token  TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  token_expiry  TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ DEFAULT now(),
+  updated_at    TIMESTAMPTZ DEFAULT now()
+);
+
 -- ── Admin navigation links ────────────────────────────────────────────────────
 -- Run once to add admin pages to the nav menu.
 -- Only admin users (profile = 'admadmadm') can access these routes.

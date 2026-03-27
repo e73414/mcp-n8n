@@ -17,7 +17,7 @@ if (!API_SECRET) {
   process.exit(1);
 }
 app.use((req, res, next) => {
-  if (req.path === '/google/callback') return next(); // OAuth redirect — no API secret
+  if (req.path === '/google/callback' || req.path === '/microsoft/callback') return next(); // OAuth redirects — no API secret
   if (req.headers['x-api-secret'] === API_SECRET) return next();
   res.status(401).json({ error: 'Unauthorized' });
 });
@@ -28,12 +28,16 @@ const N8N_API_KEY = process.env.N8N_API_KEY || '';
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/google/callback';
+const MICROSOFT_CLIENT_ID     = process.env.MICROSOFT_CLIENT_ID     || '';
+const MICROSOFT_CLIENT_SECRET = process.env.MICROSOFT_CLIENT_SECRET || '';
+const MICROSOFT_REDIRECT_URI  = process.env.MICROSOFT_REDIRECT_URI  || 'http://localhost:3000/microsoft/callback';
 const EXCEL_TO_SQL_URL = (process.env.EXCEL_TO_SQL_URL || 'http://excel-to-sql:8000').replace(/\/$/, '');
 const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
 
 if (!N8N_BASE) console.warn('N8N_BASE_URL not set; outgoing calls will fail.');
 if (!N8N_API_KEY) console.warn('N8N_API_KEY not set; some n8n endpoints may reject requests.');
 if (!GOOGLE_CLIENT_ID) console.warn('GOOGLE_CLIENT_ID not set; Google Drive ingestion will not work.');
+if (!MICROSOFT_CLIENT_ID) console.warn('MICROSOFT_CLIENT_ID not set; OneDrive ingestion will not work.');
 
 const pgPool = new Pool({
   host: process.env.PG_HOST || 'postgres',
@@ -1163,6 +1167,39 @@ async function getValidAccessToken(email, client) {
   return oauth2Client;
 }
 
+async function getValidMicrosoftToken(email, client) {
+  const r = await client.query(
+    'SELECT access_token, refresh_token, token_expiry FROM n8n_data.microsoft_oauth_tokens WHERE user_email=$1',
+    [email]
+  );
+  if (r.rowCount === 0) throw new Error('OneDrive not connected for this user');
+  let { access_token, refresh_token, token_expiry } = r.rows[0];
+  if (token_expiry && new Date(token_expiry) < new Date(Date.now() + 5 * 60 * 1000)) {
+    const params = new URLSearchParams({
+      client_id: MICROSOFT_CLIENT_ID,
+      client_secret: MICROSOFT_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token,
+      scope: 'Files.Read offline_access',
+    });
+    const resp = await axios.post(
+      'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+      params.toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    access_token = resp.data.access_token;
+    if (resp.data.refresh_token) refresh_token = resp.data.refresh_token;
+    const expiry = new Date(Date.now() + resp.data.expires_in * 1000);
+    await client.query(
+      `UPDATE n8n_data.microsoft_oauth_tokens
+       SET access_token=$1, refresh_token=$2, token_expiry=$3, updated_at=now()
+       WHERE user_email=$4`,
+      [access_token, refresh_token, expiry, email]
+    );
+  }
+  return access_token;
+}
+
 async function runIngestion(datasetId, triggeredBy = 'schedule') {
   const client = await pgPool.connect();
   let ownerEmail = null;
@@ -1184,51 +1221,102 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
     if (cfgR.rowCount === 0) throw new Error('No ingestion config found. Save config from CSV Optimizer PLUS first.');
     const config = cfgR.rows[0].config;
 
-    // 3. Get OAuth client
-    const oauth2Client = await getValidAccessToken(ownerEmail, client);
-    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    // 3. List files + download — provider-specific
+    let files, fileBuffer;
 
-    // 4. List files in folder sorted by createdTime desc
-    const listResp = await drive.files.list({
-      q: `'${sched.folder_id}' in parents and trashed=false`,
-      orderBy: 'createdTime desc',
-      pageSize: 10,
-      fields: 'files(id,name,createdTime,mimeType)',
-    });
-    const files = listResp.data.files || [];
-    if (files.length === 0) {
-      await client.query(
-        `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
-        [datasetId]
+    if (sched.location_type === 'onedrive') {
+      // ── OneDrive via Microsoft Graph ──────────────────────────────────────
+      const msToken = await getValidMicrosoftToken(ownerEmail, client);
+      const listResp = await axios.get(
+        `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(sched.folder_id)}/children`,
+        {
+          headers: { Authorization: `Bearer ${msToken}` },
+          params: { $orderby: 'createdDateTime desc', $top: 10, $select: 'id,name,createdDateTime,file' },
+        }
       );
-      return { status: 'no_new_file' };
+      files = (listResp.data.value || [])
+        .filter(f => f.file)
+        .map(f => ({ id: f.id, name: f.name, createdTime: f.createdDateTime }));
+
+      if (files.length === 0) {
+        await client.query(
+          `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
+          [datasetId]
+        );
+        return { status: 'no_new_file' };
+      }
+
+      const latestFile = files[0];
+      latestFileName = latestFile.name;
+      latestFileId = latestFile.id;
+
+      // Skip if already ingested
+      const existR = await client.query(
+        `SELECT 1 FROM n8n_data.dataset_ingestion_files WHERE dataset_id=$1 AND file_id=$2 AND ingestion_result='success'`,
+        [datasetId, latestFile.id]
+      );
+      if (existR.rowCount > 0) {
+        await client.query(
+          `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
+          [datasetId]
+        );
+        return { status: 'no_new_file', message: 'Most recent file already ingested' };
+      }
+
+      // Download from OneDrive
+      const dlResp = await axios.get(
+        `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(latestFile.id)}/content`,
+        { headers: { Authorization: `Bearer ${msToken}` }, responseType: 'arraybuffer' }
+      );
+      fileBuffer = Buffer.from(dlResp.data);
+
+    } else {
+      // ── Google Drive ──────────────────────────────────────────────────────
+      const oauth2Client = await getValidAccessToken(ownerEmail, client);
+      const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+      const listResp = await drive.files.list({
+        q: `'${sched.folder_id}' in parents and trashed=false`,
+        orderBy: 'createdTime desc',
+        pageSize: 10,
+        fields: 'files(id,name,createdTime,mimeType)',
+      });
+      files = listResp.data.files || [];
+
+      if (files.length === 0) {
+        await client.query(
+          `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
+          [datasetId]
+        );
+        return { status: 'no_new_file' };
+      }
+
+      const latestFile = files[0];
+      latestFileName = latestFile.name;
+      latestFileId = latestFile.id;
+
+      // Skip if already ingested
+      const existR = await client.query(
+        `SELECT 1 FROM n8n_data.dataset_ingestion_files WHERE dataset_id=$1 AND file_id=$2 AND ingestion_result='success'`,
+        [datasetId, latestFile.id]
+      );
+      if (existR.rowCount > 0) {
+        await client.query(
+          `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
+          [datasetId]
+        );
+        return { status: 'no_new_file', message: 'Most recent file already ingested' };
+      }
+
+      // Download from Google Drive
+      const dlResp = await drive.files.get(
+        { fileId: latestFile.id, alt: 'media' },
+        { responseType: 'arraybuffer' }
+      );
+      fileBuffer = Buffer.from(dlResp.data);
     }
 
-    // 5. Most recent file
-    const latestFile = files[0];
-    latestFileName = latestFile.name;
-    latestFileId = latestFile.id;
-
-    // 6. Skip if already successfully ingested
-    const existR = await client.query(
-      `SELECT 1 FROM n8n_data.dataset_ingestion_files
-       WHERE dataset_id=$1 AND file_id=$2 AND ingestion_result='success'`,
-      [datasetId, latestFile.id]
-    );
-    if (existR.rowCount > 0) {
-      await client.query(
-        `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
-        [datasetId]
-      );
-      return { status: 'no_new_file', message: 'Most recent file already ingested' };
-    }
-
-    // 7. Download file from Drive
-    const dlResp = await drive.files.get(
-      { fileId: latestFile.id, alt: 'media' },
-      { responseType: 'arraybuffer' }
-    );
-    const fileBuffer = Buffer.from(dlResp.data);
+    // From here: latestFileName, latestFileId, fileBuffer are set for both providers
 
     // 8. Call excel-to-sql service with config
     const sheets = config.sheets || [{ name: '0' }];
@@ -1242,7 +1330,7 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
     }
 
     const formData = new FormData();
-    formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), latestFile.name);
+    formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), latestFileName);
     const convertResp = await fetch(`${EXCEL_TO_SQL_URL}/convert?${params.toString()}`, {
       method: 'POST',
       body: formData,
@@ -1297,7 +1385,7 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
     const n8nBase = N8N_BASE.replace(/\/$/, '');
     const updateResp = await axios.post(
       `${n8nBase}/webhook/update-dataset`,
-      { datasetId, email: ownerEmail, csvData: csvBase64, fileName: latestFile.name },
+      { datasetId, email: ownerEmail, csvData: csvBase64, fileName: latestFileName },
       { headers: { 'X-N8N-API-KEY': N8N_API_KEY, 'Content-Type': 'application/json' }, timeout: 300000 }
     );
     const updateResult = updateResp.data;
@@ -1309,7 +1397,7 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
       `INSERT INTO n8n_data.dataset_ingestion_files
          (dataset_id, file_name, file_id, file_location, location_type, ingested_at, ingestion_result, rows_inserted)
        VALUES ($1, $2, $3, $4, $5, now(), 'success', $6)`,
-      [datasetId, latestFile.name, latestFile.id, sched.folder_id, sched.location_type, rowsInserted]
+      [datasetId, latestFileName, latestFileId, sched.folder_id, sched.location_type, rowsInserted]
     );
     await client.query(
       `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='success' WHERE dataset_id=$1`,
@@ -1321,12 +1409,12 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
        VALUES ($1, $2, $3, 'ingestion', $4, $5)`,
       [
         ownerEmail,
-        `[Ingestion] ${latestFile.name}`,
-        `✓ Ingestion successful.${rowsInserted ? ' ' + rowsInserted + ' rows inserted.' : ''} File: ${latestFile.name}`,
+        `[Ingestion] ${latestFileName}`,
+        `✓ Ingestion successful.${rowsInserted ? ' ' + rowsInserted + ' rows inserted.' : ''} File: ${latestFileName}`,
         datasetId, datasetName
       ]
     );
-    return { status: 'success', rowsInserted, fileName: latestFile.name };
+    return { status: 'success', rowsInserted, fileName: latestFileName };
 
   } catch (err) {
     console.error(`runIngestion error [${datasetId}]:`, err.message);
@@ -1475,6 +1563,109 @@ app.get('/google/drive/files', async (req, res) => {
     });
     res.json(listResp.data.files || []);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Microsoft OAuth endpoints ─────────────────────────────────────────────────
+
+app.get('/microsoft/auth-url', (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  if (!MICROSOFT_CLIENT_ID) return res.status(500).json({ error: 'OneDrive not configured on server' });
+  const params = new URLSearchParams({
+    client_id: MICROSOFT_CLIENT_ID,
+    response_type: 'code',
+    redirect_uri: MICROSOFT_REDIRECT_URI,
+    scope: 'Files.Read offline_access',
+    state: encodeURIComponent(String(email)),
+    response_mode: 'query',
+  });
+  res.json({ url: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize?${params}` });
+});
+
+app.get('/microsoft/callback', async (req, res) => {
+  const { code, state, error } = req.query;
+  if (error) return res.redirect(`${FRONTEND_URL}/ingestion?error=${encodeURIComponent(error)}`);
+  if (!code || !state) return res.redirect(`${FRONTEND_URL}/ingestion?error=missing_params`);
+  const email = decodeURIComponent(String(state));
+  const client = await pgPool.connect();
+  try {
+    const params = new URLSearchParams({
+      client_id: MICROSOFT_CLIENT_ID,
+      client_secret: MICROSOFT_CLIENT_SECRET,
+      code: String(code),
+      redirect_uri: MICROSOFT_REDIRECT_URI,
+      grant_type: 'authorization_code',
+    });
+    const resp = await axios.post(
+      'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+      params.toString(),
+      { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+    const { access_token, refresh_token, expires_in } = resp.data;
+    const expiry = new Date(Date.now() + expires_in * 1000);
+    await client.query(
+      `INSERT INTO n8n_data.microsoft_oauth_tokens (user_email, access_token, refresh_token, token_expiry)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (user_email) DO UPDATE
+       SET access_token=$2, refresh_token=$3, token_expiry=$4, updated_at=now()`,
+      [email, access_token, refresh_token, expiry]
+    );
+    res.redirect(`${FRONTEND_URL}/ingestion?ms_connected=1`);
+  } catch (err) {
+    console.error('Microsoft callback error:', err.message);
+    res.redirect(`${FRONTEND_URL}/ingestion?error=${encodeURIComponent(err.message)}`);
+  } finally { client.release(); }
+});
+
+app.get('/microsoft/token-status', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const r = await client.query(
+      'SELECT 1 FROM n8n_data.microsoft_oauth_tokens WHERE user_email=$1', [email]
+    );
+    res.json({ connected: r.rowCount > 0 });
+  } catch (err) {
+    console.error('GET /microsoft/token-status error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/microsoft/disconnect', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    await client.query('DELETE FROM n8n_data.microsoft_oauth_tokens WHERE user_email=$1', [email]);
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error('DELETE /microsoft/disconnect error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.get('/microsoft/onedrive/files', async (req, res) => {
+  const { email, folder_id } = req.query;
+  if (!email || !folder_id) return res.status(400).json({ error: 'email and folder_id required' });
+  const client = await pgPool.connect();
+  try {
+    const msToken = await getValidMicrosoftToken(String(email), client);
+    const resp = await axios.get(
+      `https://graph.microsoft.com/v1.0/me/drive/items/${encodeURIComponent(String(folder_id))}/children`,
+      {
+        headers: { Authorization: `Bearer ${msToken}` },
+        params: { $orderby: 'createdDateTime desc', $top: 10, $select: 'id,name,createdDateTime,file' },
+      }
+    );
+    const files = (resp.data.value || [])
+      .filter(f => f.file)
+      .map(f => ({ id: f.id, name: f.name, createdTime: f.createdDateTime, mimeType: f.file?.mimeType || '' }));
+    res.json(files);
+  } catch (err) {
+    console.error('GET /microsoft/onedrive/files error:', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
