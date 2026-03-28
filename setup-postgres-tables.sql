@@ -123,6 +123,8 @@ INSERT INTO n8n_data.app_settings (key, value) VALUES
   ('analyze_model',   NULL),
   ('plan_model',      NULL),
   ('execute_model',   NULL),
+  ('upload_model',    NULL),
+  ('report_model',    NULL),
   ('chunk_threshold', NULL),
   ('detail_level',    NULL),
   ('report_detail',   NULL)
