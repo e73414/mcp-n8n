@@ -1,8 +1,8 @@
 {
-  "updatedAt": "2026-03-29T04:09:19.635Z",
+  "updatedAt": "2026-03-29T06:59:45.962Z",
   "createdAt": "2026-02-22T06:36:49.817Z",
   "id": "taHjSlURcGuHr_vMzffkE",
-  "name": "Data Analyzer - Execute Plan v2.08",
+  "name": "Data Analyzer - Execute Plan v2.09",
   "description": null,
   "active": true,
   "isArchived": false,
@@ -971,7 +971,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "={{ (function() {\n  var step = $('Loop Over Steps').item.json.step;\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var sql = (step.query_strategy && (step.query_strategy.sql || step.query_strategy.logic)) || 'SELECT 1';\n  sql = sql.replace(/\\bstep(\\d+)\\b/gi, function(m, n) { return 'n8n_data.\"tmp_' + reportId + '_step_' + n + '\"'; });\n  sql = sql.trim().replace(/;+\\s*$/g, '');\n  sql = sql.replace(/\"([^\"]+)\"\\s*(?:!=|<>)\\s*''/g, '\"$1\" IS NOT NULL');\n  sql = sql.replace(/\"([^\"]+)\"\\s*=\\s*''/g, '\"$1\" IS NULL');\n  sql = sql.replace(/TRIM\\(\"([^\"]+)\"\\)\\s*(?:!=|<>)\\s*''/gi, '\"$1\" IS NOT NULL');\n  sql = sql.replace(/TRIM\\(\"([^\"]+)\"\\)\\s*=\\s*''/gi, '\"$1\" IS NULL');\n  var tableName = 'n8n_data.\"tmp_' + reportId + '_step_' + step.step_number + '\"';\n  return 'CREATE TABLE ' + tableName + ' AS ' + sql;\n})() }}",
+        "query": "={{ (function() {\n  var step = $('Loop Over Steps').item.json.step;\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var sql = (step.query_strategy && (step.query_strategy.sql || step.query_strategy.logic)) || 'SELECT 1';\n  sql = sql.replace(/\\bstep(\\d+)\\b/gi, function(m, n) { return 'n8n_data.\"tmp_' + reportId + '_step_' + n + '\"'; });\n  sql = sql.trim().replace(/;+\\s*$/g, '');\n  sql = sql.replace(/\"([^\"]+)\"\\s*(?:!=|<>)\\s*''/g, '\"$1\" IS NOT NULL');\n  sql = sql.replace(/\"([^\"]+)\"\\s*=\\s*''/g, '\"$1\" IS NULL');\n  sql = sql.replace(/TRIM\\(\"([^\"]+)\"\\)\\s*(?:!=|<>)\\s*''/gi, '\"$1\" IS NOT NULL');\n  sql = sql.replace(/TRIM\\(\"([^\"]+)\"\\)\\s*=\\s*''/gi, '\"$1\" IS NULL');\n  var hasLimit = /\\bLIMIT\\s+\\d+/i.test(sql);\n  if (!hasLimit) { sql = 'SELECT * FROM (' + sql + ') AS _list_data LIMIT 50000'; }\n  var tableName = 'n8n_data.\"tmp_' + reportId + '_step_' + step.step_number + '\"';\n  return 'CREATE TABLE ' + tableName + ' AS ' + sql;\n})() }}",
         "options": {}
       },
       "id": "a1b2c3d4-0001-0001-0001-000000000002",
@@ -1035,7 +1035,7 @@
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "={{ (function() {\n  var sql = ($json.output || '').trim().replace(/^```(?:sql)?\\s*/i, '').replace(/\\s*```$/, '').trim();\n  if (!sql || sql.toUpperCase().indexOf('SELECT') !== 0) {\n    var step = $('Loop Over Steps').item.json.step;\n    var cols = (step.expected_output || ['result']).map(function(c) { return 'NULL AS \"' + c + '\"'; }).join(', ');\n    sql = 'SELECT ' + cols + ' WHERE false';\n  }\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var stepNum = $('Loop Over Steps').item.json.step.step_number;\n  var tableName = 'n8n_data.\"tmp_' + reportId + '_step_' + stepNum + '\"';\n  return 'CREATE TABLE ' + tableName + ' AS ' + sql;\n})() }}",
+        "query": "={{ (function() {\n  var sql = ($json.output || '').trim().replace(/^```(?:sql)?\\s*/i, '').replace(/\\s*```$/, '').trim();\n  if (!sql || sql.toUpperCase().indexOf('SELECT') !== 0) {\n    var step = $('Loop Over Steps').item.json.step;\n    var cols = (step.expected_output || ['result']).map(function(c) { return 'NULL AS \"' + c + '\"'; }).join(', ');\n    sql = 'SELECT ' + cols + ' WHERE false';\n  }\n  var hasLimit = /\\bLIMIT\\s+\\d+/i.test(sql);\n  if (!hasLimit) { sql = 'SELECT * FROM (' + sql + ') AS _list_data LIMIT 50000'; }\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var stepNum = $('Loop Over Steps').item.json.step.step_number;\n  var tableName = 'n8n_data.\"tmp_' + reportId + '_step_' + stepNum + '\"';\n  return 'CREATE TABLE ' + tableName + ' AS ' + sql;\n})() }}",
         "options": {}
       },
       "id": "a1b2c3d4-0002-0002-0002-000000000002",
@@ -1585,16 +1585,17 @@
   },
   "settings": {
     "executionOrder": "v1",
-    "availableInMCP": false
+    "availableInMCP": false,
+    "callerPolicy": "workflowsFromSameOwner"
   },
   "staticData": null,
   "meta": {
     "templateCredsSetupCompleted": true
   },
   "pinData": {},
-  "versionId": "218d7ceb-ffc5-4c7d-b450-e98f747c2e70",
-  "activeVersionId": "218d7ceb-ffc5-4c7d-b450-e98f747c2e70",
-  "versionCounter": 803,
+  "versionId": "5ea58263-0631-483b-aef4-87c31243ea40",
+  "activeVersionId": "5ea58263-0631-483b-aef4-87c31243ea40",
+  "versionCounter": 818,
   "triggerCount": 1,
   "shared": [
     {
@@ -1652,9 +1653,9 @@
   ],
   "tags": [],
   "activeVersion": {
-    "updatedAt": "2026-03-29T04:09:21.448Z",
-    "createdAt": "2026-03-29T04:09:19.636Z",
-    "versionId": "218d7ceb-ffc5-4c7d-b450-e98f747c2e70",
+    "updatedAt": "2026-03-29T06:59:05.155Z",
+    "createdAt": "2026-03-29T06:59:05.155Z",
+    "versionId": "5ea58263-0631-483b-aef4-87c31243ea40",
     "workflowId": "taHjSlURcGuHr_vMzffkE",
     "nodes": [
       {
@@ -2107,7 +2108,7 @@
       {
         "parameters": {
           "operation": "executeQuery",
-          "query": "={{ (function() { var step = $('Loop Over Steps').item.json.step; var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_'); var sql = (step.query_strategy && (step.query_strategy.sql || step.query_strategy.logic)) || 'SELECT 1'; sql = sql.replace(/\\bstep(\\d+)\\b/gi, function(m, n) { return 'n8n_data.\"tmp_' + reportId + '_step_' + n + '\"'; }); sql = sql.trim().replace(/;+\\s*$/g, ''); var hasLimit = /\\bLIMIT\\s+\\d+/i.test(sql); if (!hasLimit) { sql = 'SELECT * FROM (' + sql + ') AS _list_query LIMIT 50000'; } return sql;})() }}",
+          "query": "={{ (function() {\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var stepNum = $('Loop Over Steps').item.json.step.step_number;\n  return 'SELECT *, COUNT(*) OVER() AS _total_count FROM n8n_data.\"tmp_' + reportId + '_step_' + stepNum + '\" LIMIT 10';\n})() }}",
           "options": {}
         },
         "id": "d811df89-ac6b-4795-845a-28332b780403",
@@ -2128,7 +2129,7 @@
       },
       {
         "parameters": {
-          "jsCode": "const items = $input.all();\n\n// Check for node execution errors (from onError: continueRegularOutput on Execute Direct SQL)\nif (items.length > 0 && items[0].json.error) {\n  const err = items[0].json.error;\n  let errMsg;\n  if (typeof err === 'string') {\n    errMsg = err;\n  } else {\n    // Capture actual PostgreSQL error (cause.message) plus query info\n    const causeMsg = (err.cause && err.cause.message) || null;\n    const mainMsg = err.message || null;\n    const desc = typeof err.description === 'string' ? err.description : null;\n    if (causeMsg && mainMsg && causeMsg !== mainMsg) {\n      // Both present: show DB error + query context\n      errMsg = causeMsg + ' | Query: ' + mainMsg.slice(0, 300);\n    } else {\n      errMsg = causeMsg || mainMsg || desc || JSON.stringify(err).slice(0, 400);\n    }\n  }\n  return [{ json: { output: null, error: 'List step SQL failed: ' + errMsg }, pairedItem: { item: 0 } }];\n}\n\nif (!items || items.length === 0) {\n  return [{ json: { output: 'No results returned.' }, pairedItem: { item: 0 } }];\n}\n\nconst rows = items.map(i => i.json);\nconst headers = Object.keys(rows[0]);\n\n// Build 10-row preview as markdown table\nconst headerRow = '| ' + headers.join(' | ') + ' |';\nconst separator = '| ' + headers.map(() => '---').join(' | ') + ' |';\nconst previewRows = rows.slice(0, 10).map(row =>\n  '| ' + headers.map(h => {\n    const val = row[h];\n    return val === null || val === undefined ? '' : String(val).replace(/\\|/g, '\\\\|');\n  }).join(' | ') + ' |'\n);\nconst preview = [headerRow, separator, ...previewRows].join('\\n');\nconst previewNote = rows.length > 10\n  ? `\\n_Showing 10 of ${rows.length} rows — full data available as download_`\n  : '';\n\n// Build full CSV\nconst escapeCSV = v => {\n  const s = String(v ?? '');\n  if (s.includes(',') || s.includes('\"') || s.includes('\\n') || s.includes('\\r')) {\n    return '\"' + s.replace(/\"/g, '\"\"') + '\"';\n  }\n  return s;\n};\nconst csvLines = [\n  headers.map(escapeCSV).join(','),\n  ...rows.map(row => headers.map(h => escapeCSV(row[h])).join(','))\n];\nconst csvData = csvLines.join('\\n');\nconst csvB64 = Buffer.from(csvData).toString('base64');\n\nconst output = `**Full List (${rows.length} rows)**\\n\\n${preview}${previewNote}\\n<!--LIST_CSV:${csvB64}-->`;\n\nreturn [{ json: { output }, pairedItem: items.map((_, i) => ({ item: i })) }];\n"
+          "jsCode": "const items = $input.all();\n\nif (items.length > 0 && items[0].json.error) {\n  const err = items[0].json.error;\n  let errMsg;\n  if (typeof err === 'string') {\n    errMsg = err;\n  } else {\n    const causeMsg = (err.cause && err.cause.message) || null;\n    const mainMsg = err.message || null;\n    const desc = typeof err.description === 'string' ? err.description : null;\n    if (causeMsg && mainMsg && causeMsg !== mainMsg) {\n      errMsg = causeMsg + ' | Query: ' + mainMsg.slice(0, 300);\n    } else {\n      errMsg = causeMsg || mainMsg || desc || JSON.stringify(err).slice(0, 400);\n    }\n  }\n  return [{ json: { output: null, error: 'List step SQL failed: ' + errMsg }, pairedItem: { item: 0 } }];\n}\n\nif (!items || items.length === 0) {\n  return [{ json: { output: 'No results returned.' }, pairedItem: { item: 0 } }];\n}\n\nconst rows = items.map(i => i.json);\nconst totalCount = rows[0]._total_count ?? rows.length;\nconst headers = Object.keys(rows[0]).filter(h => h !== '_total_count');\n\nconst headerRow = '| ' + headers.join(' | ') + ' |';\nconst separator = '| ' + headers.map(() => '---').join(' | ') + ' |';\nconst previewRows = rows.map(row =>\n  '| ' + headers.map(h => {\n    const val = row[h];\n    return val === null || val === undefined ? '' : String(val).replace(/\\|/g, '\\\\|');\n  }).join(' | ') + ' |'\n);\nconst preview = [headerRow, separator, ...previewRows].join('\\n');\nconst previewNote = totalCount > rows.length\n  ? `\\n_Showing ${rows.length} of ${totalCount} rows — full data available as download_`\n  : '';\n\nconst output = `**Full List (${totalCount} rows)**\\n\\n${preview}${previewNote}\\n<!--LIST_TABLE-->`;\n\nreturn [{ json: { output }, pairedItem: items.map((_, i) => ({ item: i })) }];\n"
         },
         "id": "fd1007fd-2275-4d95-b511-b4035215058e",
         "name": "Format List Result",
@@ -2259,7 +2260,7 @@
       {
         "parameters": {
           "operation": "executeQuery",
-          "query": "={{ (function() {\n  var sql = ($json.output || '').trim()\n    .replace(/^```(?:sql)?\\s*/i, '')\n    .replace(/\\s*```$/, '')\n    .trim();\n  if (!sql || sql.toUpperCase().indexOf('SELECT') !== 0) {\n    var step = $('Loop Over Steps').item.json.step;\n    var cols = (step.expected_output || ['result']).map(function(c) { return 'NULL AS \"' + c + '\"'; }).join(', ');\n    return 'SELECT ' + cols + ' WHERE false';\n  }\n  return sql;\n})() }}",
+          "query": "={{ (function() {\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var stepNum = $('Loop Over Steps').item.json.step.step_number;\n  return 'SELECT *, COUNT(*) OVER() AS _total_count FROM n8n_data.\"tmp_' + reportId + '_step_' + stepNum + '\" LIMIT 10';\n})() }}",
           "options": {}
         },
         "id": "0780c803-e970-4de1-b200-00840cc58944",
@@ -2596,6 +2597,134 @@
           }
         },
         "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "=DROP TABLE IF EXISTS n8n_data.\"tmp_{{ $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_') + '_step_' + $('Loop Over Steps').item.json.step.step_number }}\"",
+          "options": {}
+        },
+        "id": "a1b2c3d4-0001-0001-0001-000000000001",
+        "name": "Drop List Step Table",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          3760,
+          -2752
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "5JhwTls4nSPISJqU",
+            "name": "Postgres account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ (function() {\n  var step = $('Loop Over Steps').item.json.step;\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var sql = (step.query_strategy && (step.query_strategy.sql || step.query_strategy.logic)) || 'SELECT 1';\n  sql = sql.replace(/\\bstep(\\d+)\\b/gi, function(m, n) { return 'n8n_data.\"tmp_' + reportId + '_step_' + n + '\"'; });\n  sql = sql.trim().replace(/;+\\s*$/g, '');\n  sql = sql.replace(/\"([^\"]+)\"\\s*(?:!=|<>)\\s*''/g, '\"$1\" IS NOT NULL');\n  sql = sql.replace(/\"([^\"]+)\"\\s*=\\s*''/g, '\"$1\" IS NULL');\n  sql = sql.replace(/TRIM\\(\"([^\"]+)\"\\)\\s*(?:!=|<>)\\s*''/gi, '\"$1\" IS NOT NULL');\n  sql = sql.replace(/TRIM\\(\"([^\"]+)\"\\)\\s*=\\s*''/gi, '\"$1\" IS NULL');\n  var tableName = 'n8n_data.\"tmp_' + reportId + '_step_' + step.step_number + '\"';\n  return 'CREATE TABLE ' + tableName + ' AS ' + sql;\n})() }}",
+          "options": {}
+        },
+        "id": "a1b2c3d4-0001-0001-0001-000000000002",
+        "name": "Create List Step Table",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          4064,
+          -2752
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "5JhwTls4nSPISJqU",
+            "name": "Postgres account"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "=UPDATE n8n_data.report_step_results SET raw_table_name = 'tmp_{{ $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_') + '_step_' + $('Loop Over Steps').item.json.step.step_number }}' WHERE report_id = '{{ $('Loop Over Steps').item.json.report_id }}' AND step_number = {{ $('Loop Over Steps').item.json.step.step_number }}",
+          "options": {}
+        },
+        "id": "a1b2c3d4-0001-0001-0001-000000000003",
+        "name": "Store List raw_table_name",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          4352,
+          -2752
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "5JhwTls4nSPISJqU",
+            "name": "Postgres account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "=DROP TABLE IF EXISTS n8n_data.\"tmp_{{ $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_') + '_step_' + $('Loop Over Steps').item.json.step.step_number }}\"",
+          "options": {}
+        },
+        "id": "a1b2c3d4-0002-0002-0002-000000000001",
+        "name": "Drop List Join Step Table",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          4560,
+          -2320
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "5JhwTls4nSPISJqU",
+            "name": "Postgres account"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "={{ (function() {\n  var sql = ($json.output || '').trim().replace(/^```(?:sql)?\\s*/i, '').replace(/\\s*```$/, '').trim();\n  if (!sql || sql.toUpperCase().indexOf('SELECT') !== 0) {\n    var step = $('Loop Over Steps').item.json.step;\n    var cols = (step.expected_output || ['result']).map(function(c) { return 'NULL AS \"' + c + '\"'; }).join(', ');\n    sql = 'SELECT ' + cols + ' WHERE false';\n  }\n  var reportId = $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_');\n  var stepNum = $('Loop Over Steps').item.json.step.step_number;\n  var tableName = 'n8n_data.\"tmp_' + reportId + '_step_' + stepNum + '\"';\n  return 'CREATE TABLE ' + tableName + ' AS ' + sql;\n})() }}",
+          "options": {}
+        },
+        "id": "a1b2c3d4-0002-0002-0002-000000000002",
+        "name": "Create List Join Step Table",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          4752,
+          -2320
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "5JhwTls4nSPISJqU",
+            "name": "Postgres account"
+          }
+        },
+        "onError": "continueErrorOutput"
+      },
+      {
+        "parameters": {
+          "operation": "executeQuery",
+          "query": "=UPDATE n8n_data.report_step_results SET raw_table_name = 'tmp_{{ $('Parse Plan & Generate Report ID').item.json.report_id.replace(/[^a-zA-Z0-9_]/g, '_') + '_step_' + $('Loop Over Steps').item.json.step.step_number }}' WHERE report_id = '{{ $('Loop Over Steps').item.json.report_id }}' AND step_number = {{ $('Loop Over Steps').item.json.step.step_number }}",
+          "options": {}
+        },
+        "id": "a1b2c3d4-0002-0002-0002-000000000003",
+        "name": "Store List Join raw_table_name",
+        "type": "n8n-nodes-base.postgres",
+        "typeVersion": 2.5,
+        "position": [
+          4944,
+          -2320
+        ],
+        "credentials": {
+          "postgres": {
+            "id": "5JhwTls4nSPISJqU",
+            "name": "Postgres account"
+          }
+        }
       }
     ],
     "connections": {
@@ -2855,7 +2984,7 @@
         "main": [
           [
             {
-              "node": "Execute Direct SQL",
+              "node": "Drop List Step Table",
               "type": "main",
               "index": 0
             }
@@ -2935,7 +3064,7 @@
         "main": [
           [
             {
-              "node": "Execute Fixed SQL",
+              "node": "Drop List Join Step Table",
               "type": "main",
               "index": 0
             },
@@ -3023,18 +3152,98 @@
             }
           ]
         ]
+      },
+      "Drop List Step Table": {
+        "main": [
+          [
+            {
+              "node": "Create List Step Table",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create List Step Table": {
+        "main": [
+          [
+            {
+              "node": "Store List raw_table_name",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Format List Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Store List raw_table_name": {
+        "main": [
+          [
+            {
+              "node": "Execute Direct SQL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Drop List Join Step Table": {
+        "main": [
+          [
+            {
+              "node": "Create List Join Step Table",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create List Join Step Table": {
+        "main": [
+          [
+            {
+              "node": "Store List Join raw_table_name",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Format List Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Store List Join raw_table_name": {
+        "main": [
+          [
+            {
+              "node": "Execute Fixed SQL",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
       }
     },
     "authors": "EUN ed.e.lee@gmail.com",
-    "name": "Version 218d7ceb",
-    "description": "",
-    "autosaved": true,
+    "name": null,
+    "description": null,
+    "autosaved": false,
     "workflowPublishHistory": [
       {
-        "createdAt": "2026-03-29T04:09:21.445Z",
-        "id": 671,
+        "createdAt": "2026-03-29T06:59:05.299Z",
+        "id": 680,
         "workflowId": "taHjSlURcGuHr_vMzffkE",
-        "versionId": "218d7ceb-ffc5-4c7d-b450-e98f747c2e70",
+        "versionId": "5ea58263-0631-483b-aef4-87c31243ea40",
         "event": "activated",
         "userId": "311513a6-4117-4a5c-89e5-28f958dbd390"
       }
