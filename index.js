@@ -373,6 +373,56 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
   }
 });
 
+// Return step results metadata for a saved report (used when loading from history).
+app.get('/reports/:reportId/steps', async (req, res) => {
+  const { reportId } = req.params;
+  const client = await pgPool.connect();
+  try {
+    const r = await client.query(
+      `SELECT step_number, purpose, status, step_result, raw_table_name
+       FROM n8n_data.report_step_results WHERE report_id = $1 ORDER BY step_number`,
+      [reportId]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
+// Rename all tmp_rpt_* tables for a report to saved_rpt_* so they survive cleanup.
+// Updates raw_table_name in report_step_results to match.
+app.post('/reports/:reportId/persist', async (req, res) => {
+  const { reportId } = req.params;
+  const client = await pgPool.connect();
+  try {
+    const r = await client.query(
+      `SELECT step_number, raw_table_name FROM n8n_data.report_step_results
+       WHERE report_id = $1 AND raw_table_name IS NOT NULL AND raw_table_name LIKE 'tmp_rpt_%'`,
+      [reportId]
+    );
+    if (r.rowCount === 0) return res.json({ renamed: 0 });
+
+    for (const row of r.rows) {
+      const oldName = row.raw_table_name;
+      const newName = oldName.replace(/^tmp_rpt_/, 'saved_rpt_');
+      await client.query(`ALTER TABLE n8n_data."${oldName}" RENAME TO "${newName}"`);
+      await client.query(
+        `UPDATE n8n_data.report_step_results SET raw_table_name = $1
+         WHERE report_id = $2 AND step_number = $3`,
+        [newName, reportId, row.step_number]
+      );
+    }
+    res.json({ renamed: r.rowCount });
+  } catch (err) {
+    console.error('POST /reports/:reportId/persist error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.get('/step-export/:reportId/:stepNumber/csv', async (req, res) => {
   const { reportId, stepNumber } = req.params;
   const stepNum = parseInt(stepNumber, 10);
