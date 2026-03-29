@@ -637,7 +637,31 @@ app.delete('/conversations/:id', async (req, res) => {
   const { id } = req.params;
   const client = await pgPool.connect();
   try {
+    // Look up report_id before deleting so we can clean up step tables
+    const conv = await client.query(
+      'SELECT report_id FROM n8n_data.conversation_history WHERE id = $1', [id]
+    );
+    const reportId = conv.rows[0]?.report_id ?? null;
+
     await client.query('DELETE FROM n8n_data.conversation_history WHERE id = $1', [id]);
+
+    if (reportId) {
+      // Drop all step tables (tmp_rpt_* or saved_rpt_*) for this report
+      const tables = await client.query(
+        `SELECT raw_table_name FROM n8n_data.report_step_results
+         WHERE report_id = $1 AND raw_table_name IS NOT NULL`,
+        [reportId]
+      );
+      for (const row of tables.rows) {
+        if (/^[a-zA-Z0-9_-]+$/.test(row.raw_table_name)) {
+          await client.query(`DROP TABLE IF EXISTS n8n_data."${row.raw_table_name}"`);
+        }
+      }
+      await client.query(
+        'DELETE FROM n8n_data.report_step_results WHERE report_id = $1', [reportId]
+      );
+    }
+
     res.status(204).send();
   } catch (err) {
     console.error('DELETE /conversations/:id error:', err.message);
