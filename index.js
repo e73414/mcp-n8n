@@ -20,7 +20,7 @@ app.get('/healthz', (req, res) => res.json({ ok: true, version: '2026-03-29' }))
 
 app.use((req, res, next) => {
   if (req.path === '/google/callback' || req.path === '/microsoft/callback') return next(); // OAuth redirects — no API secret
-  if (/^\/reports\/[^/]+\/steps\/\d+\/csv$/.test(req.path)) return next(); // report IDs are unguessable — browser downloads can't send custom headers
+  if (/^\/step-export\/[^/]+\/\d+\/csv$/.test(req.path)) return next(); // report IDs are unguessable — browser downloads can't send custom headers
   if (req.headers['x-api-secret'] === API_SECRET) return next();
   res.status(401).json({ error: 'Unauthorized' });
 });
@@ -373,12 +373,17 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
   }
 });
 
-app.get('/reports/:reportId/steps/:stepNumber/csv', async (req, res) => {
+app.get('/step-export/:reportId/:stepNumber/csv', async (req, res) => {
   const { reportId, stepNumber } = req.params;
   const stepNum = parseInt(stepNumber, 10);
   if (isNaN(stepNum)) return res.status(400).json({ error: 'Invalid step number' });
 
-  const client = await pool.connect();
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    return res.status(500).json({ error: 'DB connection failed: ' + err.message });
+  }
   try {
     const r = await client.query(
       `SELECT raw_table_name, purpose FROM n8n_data.report_step_results WHERE report_id = $1 AND step_number = $2`,
@@ -414,7 +419,7 @@ app.get('/reports/:reportId/steps/:stepNumber/csv', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 
