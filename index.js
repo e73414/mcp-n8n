@@ -370,6 +370,51 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
   }
 });
 
+app.get('/reports/:reportId/steps/:stepNumber/csv', async (req, res) => {
+  const { reportId, stepNumber } = req.params;
+  const stepNum = parseInt(stepNumber, 10);
+  if (isNaN(stepNum)) return res.status(400).json({ error: 'Invalid step number' });
+
+  const client = await pool.connect();
+  try {
+    const r = await client.query(
+      `SELECT raw_table_name, purpose FROM n8n_data.report_step_results WHERE report_id = $1 AND step_number = $2`,
+      [reportId, stepNum]
+    );
+    if (r.rowCount === 0 || !r.rows[0].raw_table_name) {
+      return res.status(404).json({ error: 'Step table not found' });
+    }
+    const { raw_table_name, purpose } = r.rows[0];
+    if (!/^[a-zA-Z0-9_-]+$/.test(raw_table_name)) {
+      return res.status(400).json({ error: 'Invalid table name' });
+    }
+    const data = await client.query(`SELECT * FROM n8n_data."${raw_table_name}"`);
+    if (data.rows.length === 0) {
+      return res.status(404).json({ error: 'No data in step table' });
+    }
+    const headers = Object.keys(data.rows[0]);
+    const escapeCSV = v => {
+      const s = String(v ?? '');
+      if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    };
+    const lines = [
+      headers.map(escapeCSV).join(','),
+      ...data.rows.map(row => headers.map(h => escapeCSV(row[h])).join(','))
+    ];
+    const filename = (purpose || `step_${stepNum}`).slice(0, 50).replace(/[^a-z0-9]/gi, '_').toLowerCase() + '.csv';
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(lines.join('\n'));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
+
 app.get('/datasets/:datasetId/download-csv', async (req, res) => {
   const { datasetId } = req.params;
   const { email } = req.query;
