@@ -378,12 +378,7 @@ app.get('/step-export/:reportId/:stepNumber/csv', async (req, res) => {
   const stepNum = parseInt(stepNumber, 10);
   if (isNaN(stepNum)) return res.status(400).json({ error: 'Invalid step number' });
 
-  let client;
-  try {
-    client = await pool.connect();
-  } catch (err) {
-    return res.status(500).json({ error: 'DB connection failed: ' + err.message });
-  }
+  const client = await pgPool.connect();
   try {
     const r = await client.query(
       `SELECT raw_table_name, purpose FROM n8n_data.report_step_results WHERE report_id = $1 AND step_number = $2`,
