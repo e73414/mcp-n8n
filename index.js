@@ -18,6 +18,7 @@ if (!API_SECRET) {
 }
 app.use((req, res, next) => {
   if (req.path === '/google/callback' || req.path === '/microsoft/callback') return next(); // OAuth redirects — no API secret
+  if (/^\/reports\/[^/]+\/steps\/\d+\/csv$/.test(req.path)) return next(); // report IDs are unguessable — browser downloads can't send custom headers
   if (req.headers['x-api-secret'] === API_SECRET) return next();
   res.status(401).json({ error: 'Unauthorized' });
 });
