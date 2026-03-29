@@ -16,6 +16,8 @@ if (!API_SECRET) {
   console.error('FATAL: API_SECRET environment variable is not set. Refusing to start.');
   process.exit(1);
 }
+app.get('/healthz', (req, res) => res.json({ ok: true, version: '2026-03-29' }));
+
 app.use((req, res, next) => {
   if (req.path === '/google/callback' || req.path === '/microsoft/callback') return next(); // OAuth redirects — no API secret
   if (/^\/reports\/[^/]+\/steps\/\d+\/csv$/.test(req.path)) return next(); // report IDs are unguessable — browser downloads can't send custom headers
