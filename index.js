@@ -1811,6 +1811,35 @@ app.get('/microsoft/onedrive/files', async (req, res) => {
   } finally { client.release(); }
 });
 
+app.get('/microsoft/onedrive/csv', async (req, res) => {
+  const { email, share_url } = req.query;
+  if (!email || !share_url) return res.status(400).json({ error: 'email and share_url required' });
+  const client = await pgPool.connect();
+  try {
+    const msToken = await getValidMicrosoftToken(String(email), client);
+    // Encode share URL as base64url per Microsoft Graph shared item API
+    const encoded = Buffer.from(String(share_url)).toString('base64')
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    const sharingToken = `u!${encoded}`;
+    // Get the download URL from the shared item
+    const metaResp = await axios.get(
+      `https://graph.microsoft.com/v1.0/shares/${sharingToken}/driveItem`,
+      { headers: { Authorization: `Bearer ${msToken}` } }
+    );
+    const downloadUrl = metaResp.data['@microsoft.graph.downloadUrl'];
+    if (!downloadUrl) return res.status(400).json({ error: 'Could not get download URL from OneDrive item' });
+    const fileResp = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
+    const contentType = metaResp.data.file?.mimeType || 'application/octet-stream';
+    const fileName = metaResp.data.name || 'onedrive_file';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('X-File-Name', encodeURIComponent(fileName));
+    res.send(Buffer.from(fileResp.data));
+  } catch (err) {
+    console.error('GET /microsoft/onedrive/csv error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // ── Ingestion config endpoints ────────────────────────────────────────────────
 
 app.get('/ingestion/config/:datasetId', async (req, res) => {
