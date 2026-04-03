@@ -1347,16 +1347,17 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
     let files, fileBuffer;
 
     if (sched.location_type === 'google_sheets') {
-      // ── Google Sheets — fetch CSV directly, deduplicate by modified time ────
+      // ── Google Sheets — deduplicate by modified time, format by mimeType ────
       const oauth2Client = await getValidAccessToken(ownerEmail, client);
       const credentials = oauth2Client.credentials;
-      // Get sheet metadata for modified time and name
+      // Get sheet metadata including mimeType to determine download format
       const metaResp = await axios.get(
-        `https://www.googleapis.com/drive/v3/files/${sched.folder_id}?fields=id,name,modifiedTime`,
+        `https://www.googleapis.com/drive/v3/files/${sched.folder_id}?fields=id,name,modifiedTime,mimeType`,
         { headers: { Authorization: `Bearer ${credentials.access_token}` } }
       );
       const sheetMeta = metaResp.data;
-      latestFileName = sheetMeta.name || `sheet_${sched.folder_id}`;
+      const sheetMimeType = sheetMeta.mimeType || '';
+      const baseName = (sheetMeta.name || `sheet_${sched.folder_id}`).replace(/\.(csv|xlsx?|xlsm)$/i, '');
       latestFileId = sched.folder_id;
       // Skip if sheet hasn't been modified since last successful run
       if (sched.last_run_at && sheetMeta.modifiedTime) {
@@ -1368,12 +1369,33 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
           return { status: 'no_new_file', message: 'Google Sheet has not been modified since last ingestion' };
         }
       }
-      const exportUrl = `https://docs.google.com/spreadsheets/d/${sched.folder_id}/export?format=csv`;
-      const csvResp = await axios.get(exportUrl, {
-        headers: { Authorization: `Bearer ${credentials.access_token}` },
-        responseType: 'arraybuffer',
-      });
-      fileBuffer = Buffer.from(csvResp.data);
+      if (sheetMimeType === 'application/vnd.google-apps.spreadsheet') {
+        // Native Google Sheet — export as xlsx
+        latestFileName = baseName + '.xlsx';
+        const exportUrl = `https://docs.google.com/spreadsheets/d/${sched.folder_id}/export?format=xlsx`;
+        const dlResp = await axios.get(exportUrl, {
+          headers: { Authorization: `Bearer ${credentials.access_token}` },
+          responseType: 'arraybuffer',
+        });
+        fileBuffer = Buffer.from(dlResp.data);
+      } else if (sheetMimeType === 'text/csv' || sheetMimeType === 'text/plain') {
+        // Uploaded CSV — download directly
+        latestFileName = baseName + '.csv';
+        const dlResp = await axios.get(
+          `https://www.googleapis.com/drive/v3/files/${sched.folder_id}?alt=media`,
+          { headers: { Authorization: `Bearer ${credentials.access_token}` }, responseType: 'arraybuffer' }
+        );
+        fileBuffer = Buffer.from(dlResp.data);
+      } else {
+        // Uploaded Excel — download directly, preserve extension from original name
+        const extMatch = (sheetMeta.name || '').match(/\.(xlsx?|xlsm)$/i);
+        latestFileName = baseName + (extMatch ? extMatch[0].toLowerCase() : '.xlsx');
+        const dlResp = await axios.get(
+          `https://www.googleapis.com/drive/v3/files/${sched.folder_id}?alt=media`,
+          { headers: { Authorization: `Bearer ${credentials.access_token}` }, responseType: 'arraybuffer' }
+        );
+        fileBuffer = Buffer.from(dlResp.data);
+      }
 
     } else if (sched.location_type === 'onedrive_file') {
       // ── OneDrive single file — resolve share URL, deduplicate by modified time
@@ -1471,8 +1493,9 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
       }
 
       const latestFile = files[0];
-      latestFileName = latestFile.name;
       latestFileId = latestFile.id;
+      const fileMimeType = latestFile.mimeType || '';
+      const fileBaseName = (latestFile.name || latestFileId).replace(/\.(csv|xlsx?|xlsm)$/i, '');
 
       // Skip if already ingested
       const existR = await client.query(
@@ -1487,12 +1510,33 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
         return { status: 'no_new_file', message: 'Most recent file already ingested' };
       }
 
-      // Download from Google Drive
-      const dlResp = await drive.files.get(
-        { fileId: latestFile.id, alt: 'media' },
-        { responseType: 'arraybuffer' }
-      );
-      fileBuffer = Buffer.from(dlResp.data);
+      // Download from Google Drive — format depends on file type
+      if (fileMimeType === 'application/vnd.google-apps.spreadsheet') {
+        // Native Google Sheet in folder — export as xlsx
+        latestFileName = fileBaseName + '.xlsx';
+        const credentials = oauth2Client.credentials;
+        const dlResp = await axios.get(
+          `https://docs.google.com/spreadsheets/d/${latestFile.id}/export?format=xlsx`,
+          { headers: { Authorization: `Bearer ${credentials.access_token}` }, responseType: 'arraybuffer' }
+        );
+        fileBuffer = Buffer.from(dlResp.data);
+      } else if (fileMimeType === 'text/csv' || fileMimeType === 'text/plain') {
+        latestFileName = fileBaseName + '.csv';
+        const dlResp = await drive.files.get(
+          { fileId: latestFile.id, alt: 'media' },
+          { responseType: 'arraybuffer' }
+        );
+        fileBuffer = Buffer.from(dlResp.data);
+      } else {
+        // Uploaded Excel — preserve extension
+        const extMatch = (latestFile.name || '').match(/\.(xlsx?|xlsm)$/i);
+        latestFileName = fileBaseName + (extMatch ? extMatch[0].toLowerCase() : '.xlsx');
+        const dlResp = await drive.files.get(
+          { fileId: latestFile.id, alt: 'media' },
+          { responseType: 'arraybuffer' }
+        );
+        fileBuffer = Buffer.from(dlResp.data);
+      }
     }
 
     // From here: latestFileName, latestFileId, fileBuffer are set for both providers
