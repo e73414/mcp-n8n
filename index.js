@@ -1609,7 +1609,7 @@ app.get('/google/auth-url', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
     prompt: 'consent',
-    scope: ['https://www.googleapis.com/auth/drive.readonly'],
+    scope: ['https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/spreadsheets.readonly'],
     state: encodeURIComponent(email),
   });
   res.json({ url });
@@ -1684,6 +1684,25 @@ app.get('/google/drive/files', async (req, res) => {
       fields: 'files(id,name,createdTime,mimeType)',
     });
     res.json(listResp.data.files || []);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.get('/google/sheets/csv', async (req, res) => {
+  const { email, sheet_id, gid } = req.query;
+  if (!email || !sheet_id) return res.status(400).json({ error: 'email and sheet_id required' });
+  const client = await pgPool.connect();
+  try {
+    const oauth2Client = await getValidAccessToken(email, client);
+    const credentials = oauth2Client.credentials;
+    const exportUrl = `https://docs.google.com/spreadsheets/d/${sheet_id}/export?format=csv${gid ? `&gid=${gid}` : ''}`;
+    const response = await axios.get(exportUrl, {
+      headers: { Authorization: `Bearer ${credentials.access_token}` },
+      responseType: 'text',
+    });
+    res.setHeader('Content-Type', 'text/csv');
+    res.send(response.data);
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
