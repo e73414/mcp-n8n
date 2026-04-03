@@ -1346,7 +1346,64 @@ async function runIngestion(datasetId, triggeredBy = 'schedule') {
     // 3. List files + download — provider-specific
     let files, fileBuffer;
 
-    if (sched.location_type === 'onedrive') {
+    if (sched.location_type === 'google_sheets') {
+      // ── Google Sheets — fetch CSV directly, deduplicate by modified time ────
+      const oauth2Client = await getValidAccessToken(ownerEmail, client);
+      const credentials = oauth2Client.credentials;
+      // Get sheet metadata for modified time and name
+      const metaResp = await axios.get(
+        `https://www.googleapis.com/drive/v3/files/${sched.folder_id}?fields=id,name,modifiedTime`,
+        { headers: { Authorization: `Bearer ${credentials.access_token}` } }
+      );
+      const sheetMeta = metaResp.data;
+      latestFileName = sheetMeta.name || `sheet_${sched.folder_id}`;
+      latestFileId = sched.folder_id;
+      // Skip if sheet hasn't been modified since last successful run
+      if (sched.last_run_at && sheetMeta.modifiedTime) {
+        if (new Date(sheetMeta.modifiedTime) <= new Date(sched.last_run_at)) {
+          await client.query(
+            `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
+            [datasetId]
+          );
+          return { status: 'no_new_file', message: 'Google Sheet has not been modified since last ingestion' };
+        }
+      }
+      const exportUrl = `https://docs.google.com/spreadsheets/d/${sched.folder_id}/export?format=csv`;
+      const csvResp = await axios.get(exportUrl, {
+        headers: { Authorization: `Bearer ${credentials.access_token}` },
+        responseType: 'arraybuffer',
+      });
+      fileBuffer = Buffer.from(csvResp.data);
+
+    } else if (sched.location_type === 'onedrive_file') {
+      // ── OneDrive single file — resolve share URL, deduplicate by modified time
+      const msToken = await getValidMicrosoftToken(ownerEmail, client);
+      const encoded = Buffer.from(sched.folder_id).toString('base64')
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+      const sharingToken = `u!${encoded}`;
+      const metaResp = await axios.get(
+        `https://graph.microsoft.com/v1.0/shares/${sharingToken}/driveItem`,
+        { headers: { Authorization: `Bearer ${msToken}` } }
+      );
+      const item = metaResp.data;
+      latestFileName = item.name || 'onedrive_file';
+      latestFileId = item.id;
+      // Skip if file hasn't been modified since last successful run
+      if (sched.last_run_at && item.lastModifiedDateTime) {
+        if (new Date(item.lastModifiedDateTime) <= new Date(sched.last_run_at)) {
+          await client.query(
+            `UPDATE n8n_data.dataset_ingestion_schedule SET last_run_at=now(), last_run_status='no_new_file' WHERE dataset_id=$1`,
+            [datasetId]
+          );
+          return { status: 'no_new_file', message: 'OneDrive file has not been modified since last ingestion' };
+        }
+      }
+      const downloadUrl = item['@microsoft.graph.downloadUrl'];
+      if (!downloadUrl) throw new Error('Could not get download URL from OneDrive item');
+      const dlResp = await axios.get(downloadUrl, { responseType: 'arraybuffer' });
+      fileBuffer = Buffer.from(dlResp.data);
+
+    } else if (sched.location_type === 'onedrive') {
       // ── OneDrive via Microsoft Graph ──────────────────────────────────────
       const msToken = await getValidMicrosoftToken(ownerEmail, client);
       const listResp = await axios.get(
@@ -1888,7 +1945,7 @@ app.get('/ingestion/schedule/:datasetId', async (req, res) => {
 });
 
 app.post('/ingestion/schedule', async (req, res) => {
-  const { dataset_id, owner_email, folder_id, schedule, enabled = true } = req.body;
+  const { dataset_id, owner_email, folder_id, location_type = 'google_drive', schedule, enabled = true } = req.body;
   if (!dataset_id || !owner_email || !folder_id) {
     return res.status(400).json({ error: 'dataset_id, owner_email, and folder_id required' });
   }
@@ -1896,12 +1953,12 @@ app.post('/ingestion/schedule', async (req, res) => {
   try {
     const r = await client.query(
       `INSERT INTO n8n_data.dataset_ingestion_schedule
-         (dataset_id, owner_email, folder_id, schedule, enabled)
-       VALUES ($1, $2, $3, $4, $5)
+         (dataset_id, owner_email, folder_id, location_type, schedule, enabled)
+       VALUES ($1, $2, $3, $4, $5, $6)
        ON CONFLICT (dataset_id) DO UPDATE SET
-         folder_id=$3, schedule=$4, enabled=$5, updated_at=now()
+         folder_id=$3, location_type=$4, schedule=$5, enabled=$6, updated_at=now()
        RETURNING *`,
-      [dataset_id, owner_email, folder_id, schedule || null, enabled]
+      [dataset_id, owner_email, folder_id, location_type, schedule || null, enabled]
     );
     const row = r.rows[0];
     if (row.enabled && row.schedule) scheduleJob(row);
@@ -1988,6 +2045,24 @@ app.get('/ingestion/files/:datasetId', async (req, res) => {
       [datasetId]
     );
     res.json(r.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/ingestion/log', async (req, res) => {
+  const { dataset_id, file_name, file_id, file_location, location_type, ingestion_result = 'success', rows_inserted } = req.body;
+  if (!dataset_id || !location_type) return res.status(400).json({ error: 'dataset_id and location_type required' });
+  const client = await pgPool.connect();
+  try {
+    const r = await client.query(
+      `INSERT INTO n8n_data.dataset_ingestion_files
+         (dataset_id, file_name, file_id, file_location, location_type, ingested_at, ingestion_result, rows_inserted)
+       VALUES ($1, $2, $3, $4, $5, now(), $6, $7)
+       RETURNING *`,
+      [dataset_id, file_name || null, file_id || null, file_location || null, location_type, ingestion_result, rows_inserted || null]
+    );
+    res.json(r.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
