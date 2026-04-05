@@ -2248,27 +2248,40 @@ app.post('/email-ingestion/process', async (req, res) => {
     }
     const { dataset_name: datasetName, dataset_headers: savedHeaders } = dsRow.rows[0];
 
-    // 2. Convert file via excel-to-sql service
+    // 2. Decode file buffer and validate it has content
     const fileBuffer = Buffer.from(file_buffer, 'base64');
-    const formData = new FormData();
-    formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), file_name);
-    const convertResp = await fetch(`${EXCEL_TO_SQL_URL}/convert`, { method: 'POST', body: formData });
-    if (!convertResp.ok) {
-      const errText = await convertResp.text();
-      throw new Error(`Conversion service error ${convertResp.status}: ${errText}`);
+    if (fileBuffer.length === 0) throw new Error('file_buffer decoded to empty — binary data may not have been passed correctly from n8n');
+    console.log(`email-ingestion: received file ${file_name}, decoded size ${fileBuffer.length} bytes`);
+
+    // 3. Convert file via excel-to-sql service (or use raw content if already a CSV)
+    let cleanCsv = null;
+    if (file_name.toLowerCase().endsWith('.csv')) {
+      // Already a CSV — use directly, normalising line endings
+      cleanCsv = fileBuffer.toString('utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    } else {
+      const formData = new FormData();
+      formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), file_name);
+      const convertResp = await fetch(`${EXCEL_TO_SQL_URL}/convert`, { method: 'POST', body: formData });
+      if (!convertResp.ok) {
+        const errText = await convertResp.text();
+        throw new Error(`Conversion service error ${convertResp.status}: ${errText}`);
+      }
+      const zipBuffer = await convertResp.arrayBuffer();
+      const zip = await JSZip.loadAsync(zipBuffer);
+      for (const [filename, fileObj] of Object.entries(zip.files)) {
+        if (filename.endsWith('_clean.csv')) {
+          cleanCsv = await fileObj.async('string');
+          break;
+        }
+      }
+      if (!cleanCsv) throw new Error('Conversion service did not return a clean CSV');
     }
 
-    // 3. Extract clean CSV from ZIP
-    const zipBuffer = await convertResp.arrayBuffer();
-    const zip = await JSZip.loadAsync(zipBuffer);
-    let cleanCsv = null;
-    for (const [filename, fileObj] of Object.entries(zip.files)) {
-      if (filename.endsWith('_clean.csv')) {
-        cleanCsv = await fileObj.async('string');
-        break;
-      }
-    }
-    if (!cleanCsv) throw new Error('Conversion service did not return a clean CSV');
+    // Validate CSV has at least a header + one data row
+    const csvLines = cleanCsv.split('\n').filter(l => l.trim());
+    if (csvLines.length < 2) throw new Error(`Converted CSV has only ${csvLines.length} line(s) — file may be empty or conversion failed`);
+    console.log(`email-ingestion: CSV has ${csvLines.length} lines (including header)`);
+
     const csvBase64 = Buffer.from(cleanCsv).toString('base64');
 
     // 4. Validate incoming headers against saved schema
