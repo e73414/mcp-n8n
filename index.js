@@ -2249,6 +2249,7 @@ app.post('/email-ingestion/process', async (req, res) => {
     const { dataset_name: datasetName, dataset_headers: savedHeaders } = dsRow.rows[0];
 
     // 2. Decode file buffer and validate it has content
+    console.log(`email-ingestion: file_buffer type=${typeof file_buffer}, length=${file_buffer?.length}, first 100: ${JSON.stringify(String(file_buffer).slice(0, 100))}`);
     const fileBuffer = Buffer.from(file_buffer, 'base64');
     if (fileBuffer.length === 0) throw new Error('file_buffer decoded to empty — binary data may not have been passed correctly from n8n');
     console.log(`email-ingestion: received file ${file_name}, decoded size ${fileBuffer.length} bytes`);
