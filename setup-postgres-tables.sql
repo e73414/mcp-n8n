@@ -236,6 +236,7 @@ CREATE INDEX IF NOT EXISTS idx_email_ingestion_message_id
 -- Only admin users (profile = 'admadmadm') can access these routes.
 INSERT INTO n8n_data.nav_links (name, path, "order", separator_before)
 VALUES
+  ('Ingestion Pipelines', '/ingestion-pipelines', 50, true),
   ('Admin: Profiles',  '/admin/profiles',  100, true),
   ('Admin: Users',     '/admin/users',     101, false),
   ('Admin: Templates', '/admin/templates', 102, false),

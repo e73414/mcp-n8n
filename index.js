@@ -2279,27 +2279,31 @@ app.post('/email-ingestion/process', (req, res, next) => {
     // 3. Convert file via excel-to-sql service (or use raw content if already a CSV)
     let cleanCsv = null;
     if (file_name.toLowerCase().endsWith('.csv')) {
-      // Already a CSV — use directly, normalising line endings
-      const rawStr = fileBuffer.toString('utf8');
-      console.log(`email-ingestion: raw CSV first 300 chars: ${JSON.stringify(rawStr.slice(0, 300))}`);
-      cleanCsv = rawStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      cleanCsv = fileBuffer.toString('utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     } else {
-      const formData = new FormData();
-      formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), file_name);
-      const convertResp = await fetch(`${EXCEL_TO_SQL_URL}/convert`, { method: 'POST', body: formData });
-      if (!convertResp.ok) {
-        const errText = await convertResp.text();
-        throw new Error(`Conversion service error ${convertResp.status}: ${errText}`);
-      }
-      const zipBuffer = await convertResp.arrayBuffer();
-      const zip = await JSZip.loadAsync(zipBuffer);
-      for (const [filename, fileObj] of Object.entries(zip.files)) {
-        if (filename.endsWith('_clean.csv')) {
-          cleanCsv = await fileObj.async('string');
-          break;
+      const doConvert = async () => {
+        const formData = new FormData();
+        formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), file_name);
+        const convertResp = await fetch(`${EXCEL_TO_SQL_URL}/convert`, { method: 'POST', body: formData });
+        if (!convertResp.ok) {
+          const errText = await convertResp.text();
+          throw new Error(`Conversion service error ${convertResp.status}: ${errText}`);
         }
+        const zipBuffer = await convertResp.arrayBuffer();
+        const zip = await JSZip.loadAsync(zipBuffer);
+        for (const [filename, fileObj] of Object.entries(zip.files)) {
+          if (filename.endsWith('_clean.csv')) return await fileObj.async('string');
+        }
+        throw new Error('Conversion service did not return a clean CSV');
+      };
+      try {
+        cleanCsv = await doConvert();
+      } catch (err) {
+        // Retry once after 4s to handle excel-to-sql cold start
+        console.log(`email-ingestion: excel-to-sql first attempt failed (${err.message}), retrying in 4s...`);
+        await new Promise(r => setTimeout(r, 4000));
+        cleanCsv = await doConvert();
       }
-      if (!cleanCsv) throw new Error('Conversion service did not return a clean CSV');
     }
 
     // Validate CSV has at least a header + one data row
@@ -2426,6 +2430,27 @@ app.get('/email-ingestion/requests', async (req, res) => {
       [email]
     );
     return res.json({ status: 'ok', requests: rows });
+  } finally {
+    pgClient.release();
+  }
+});
+
+// GET /ingestion/schedules?email=...
+// Returns all ingestion schedules for a user with dataset names.
+app.get('/ingestion/schedules', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ status: 'error', message: 'email required' });
+  const pgClient = await pgPool.connect();
+  try {
+    const { rows } = await pgClient.query(
+      `SELECT s.*, d.dataset_name
+       FROM n8n_data.dataset_ingestion_schedule s
+       JOIN n8n_data.dataset_record_manager d ON d.dataset_id::text = s.dataset_id
+       WHERE LOWER(s.owner_email) = LOWER($1)
+       ORDER BY s.updated_at DESC`,
+      [email]
+    );
+    return res.json(rows);
   } finally {
     pgClient.release();
   }
