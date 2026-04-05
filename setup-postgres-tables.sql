@@ -209,6 +209,28 @@ CREATE TABLE IF NOT EXISTS n8n_data.microsoft_oauth_tokens (
   updated_at    TIMESTAMPTZ DEFAULT now()
 );
 
+-- Email-driven dataset ingestion requests (pending choice + audit log)
+CREATE TABLE IF NOT EXISTS n8n_data.email_ingestion_requests (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  sender_email         TEXT NOT NULL,
+  message_id           TEXT NOT NULL,           -- original email Message-ID header
+  subject              TEXT,
+  file_name            TEXT,
+  csv_data             TEXT,                    -- base64 clean CSV after excel-to-sql conversion
+  candidate_datasets   JSONB,                  -- [{dataset_id, dataset_name, confidence, reason}]
+  chosen_dataset_id    TEXT,
+  status               TEXT NOT NULL DEFAULT 'pending_choice',
+                       -- pending_choice | processing | completed | failed | expired | no_datasets
+  result_rows_inserted INTEGER,
+  error_message        TEXT,
+  created_at           TIMESTAMPTZ DEFAULT now(),
+  updated_at           TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_email_ingestion_sender
+  ON n8n_data.email_ingestion_requests(sender_email, status);
+CREATE INDEX IF NOT EXISTS idx_email_ingestion_message_id
+  ON n8n_data.email_ingestion_requests(message_id);
+
 -- ── Admin navigation links ────────────────────────────────────────────────────
 -- Run once to add admin pages to the nav menu.
 -- Only admin users (profile = 'admadmadm') can access these routes.

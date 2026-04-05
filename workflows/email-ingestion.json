@@ -1,0 +1,342 @@
+{
+  "name": "Email Dataset Ingestion",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "simple": false,
+        "options": {
+          "downloadAttachments": true
+        }
+      },
+      "id": "a1000000-0000-0000-0000-000000000001",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Classify the email as 'ingest', 'reply', or 'skip'.\nconst item = $input.first();\nconst json = item.json || {};\nconst binary = item.binary || {};\n\n// Resolve sender email from Gmail 'from' field\nconst fromRaw = json.from || '';\nconst senderEmail = (\n  fromRaw.match(/<([^>]+)>/)?.[1] || fromRaw\n).toLowerCase().trim();\n\nif (!senderEmail) {\n  return [{ json: { email_type: 'skip', reason: 'no_sender' } }];\n}\n\n// Get Message-ID and In-Reply-To from Gmail headers array\nconst headers = json.payload?.headers || [];\nconst getHeader = name => (headers.find(h => h.name.toLowerCase() === name.toLowerCase()) || {}).value || '';\nconst messageId = getHeader('Message-ID') || json.id || '';\nconst inReplyTo = getHeader('In-Reply-To') || '';\nconst subject  = json.subject || '';\nconst bodyText = json.text || json.snippet || '';\n\n// Check for a compatible file attachment\nconst compatibleExts = ['.csv', '.xlsx', '.xls', '.xlsm'];\nconst attachments = json.attachments || [];\nconst compatibleAtt = attachments.find(a => {\n  const filename = (a.fileName || a.filename || '').toLowerCase();\n  return compatibleExts.some(ext => filename.endsWith(ext));\n});\n\nif (compatibleAtt) {\n  const attFilename = compatibleAtt.fileName || compatibleAtt.filename || '';\n  // Find the binary key for this attachment\n  const binaryKey = Object.keys(binary).find(k =>\n    binary[k].fileName === attFilename\n  ) || 'attachment_0';\n  const binaryItem = binary[binaryKey];\n\n  if (!binaryItem || !binaryItem.data) {\n    return [{ json: { email_type: 'skip', reason: 'binary_missing', sender_email: senderEmail } }];\n  }\n\n  return [{ json: {\n    email_type: 'ingest',\n    sender_email: senderEmail,\n    message_id: messageId,\n    subject: subject,\n    file_name: attFilename || 'attachment',\n    file_buffer: binaryItem.data\n  }}];\n}\n\n// No attachment — check if this looks like a choice reply\nif (inReplyTo || /^\\s*[123]\\s*$/.test(bodyText)) {\n  return [{ json: {\n    email_type: 'reply',\n    sender_email: senderEmail,\n    in_reply_to: inReplyTo,\n    body_text: bodyText,\n    subject: subject\n  }}];\n}\n\nreturn [{ json: { email_type: 'skip', reason: 'no_match' } }];"
+      },
+      "id": "a1000000-0000-0000-0000-000000000002",
+      "name": "Classify Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.email_type }}",
+        "rules": {
+          "rules": [
+            { "value2": "ingest" },
+            { "value2": "reply" }
+          ]
+        },
+        "fallbackOutput": 2
+      },
+      "id": "a1000000-0000-0000-0000-000000000003",
+      "name": "Route by Email Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://data.ede-lee.ca/mcp-n8n/email-ingestion/process",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-secret",
+              "value": "950af2021e79797e4bf848e3d0ad7754e8172adbef38f5559d11470ffb3ab757"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "sender_email", "value": "={{ $json.sender_email }}" },
+            { "name": "message_id",   "value": "={{ $json.message_id }}" },
+            { "name": "subject",      "value": "={{ $json.subject }}" },
+            { "name": "file_name",    "value": "={{ $json.file_name }}" },
+            { "name": "file_buffer",  "value": "={{ $json.file_buffer }}" }
+          ]
+        },
+        "options": { "timeout": 120000 }
+      },
+      "id": "a1000000-0000-0000-0000-000000000004",
+      "name": "POST /email-ingestion/process",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 80]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.action }}",
+        "rules": {
+          "rules": [
+            { "value2": "auto_proceed" },
+            { "value2": "awaiting_choice" },
+            { "value2": "no_datasets" }
+          ]
+        },
+        "fallbackOutput": 3
+      },
+      "id": "a1000000-0000-0000-0000-000000000005",
+      "name": "Route by Ingest Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [960, 80]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nconst candidates = item.candidates || [];\n\nconst rows = candidates.map((c, i) =>\n  '<tr>' +\n  '<td style=\"padding:12px 16px;font-size:24px;font-weight:bold;color:#4c1d95;width:48px;text-align:center;border-right:1px solid #e5e7eb;\">' + (i + 1) + '</td>' +\n  '<td style=\"padding:12px 16px;\">' +\n  '<strong style=\"font-size:15px;color:#111;\">' + c.dataset_name + '</strong><br>' +\n  '<span style=\"color:#059669;font-size:13px;font-weight:600;\">Confidence: ' + c.confidence + '%</span><br>' +\n  '<span style=\"color:#374151;font-size:13px;\">' + c.reason + '</span>' +\n  '</td></tr>'\n).join('<tr><td colspan=\"2\" style=\"border-top:1px solid #f3f4f6;\"></td></tr>');\n\nconst html = '<!DOCTYPE html><html><body style=\"font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#111;max-width:600px;margin:0 auto;padding:24px;\">' +\n  '<div style=\"border-left:4px solid #7c3aed;padding-left:16px;margin-bottom:24px;\">' +\n  '<h2 style=\"margin:0 0 4px;color:#4c1d95;\">Dataset Match Required</h2>' +\n  '<p style=\"margin:0;color:#6b7280;font-size:14px;\">File: <strong>' + (item.file_name || 'attachment') + '</strong></p></div>' +\n  '<p>We could not automatically determine which dataset this file belongs to (confidence below 90%). Please choose:</p>' +\n  '<table style=\"border-collapse:collapse;width:100%;border:1px solid #e5e7eb;overflow:hidden;margin:16px 0;\">' + rows + '</table>' +\n  '<div style=\"background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:12px 16px;\">' +\n  '<p style=\"margin:0;font-size:14px;color:#4c1d95;\"><strong>Reply to this email</strong> with just the number <strong>1</strong>, <strong>2</strong>, or <strong>3</strong> to proceed.</p></div>' +\n  '<p style=\"color:#9ca3af;font-size:12px;margin-top:24px;\">DataPilot automated ingestion</p>' +\n  '</body></html>';\n\nreturn [{ json: { ...item, choice_email_html: html } }];"
+      },
+      "id": "a1000000-0000-0000-0000-000000000006",
+      "name": "Build Choice Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 280]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.sender_email }}",
+        "subject": "=Dataset Updated: {{ $json.dataset_name }}",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html><html><body style=\"font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#111;max-width:600px;margin:0 auto;padding:24px;\"><div style=\"border-left:4px solid #16a34a;padding-left:16px;margin-bottom:24px;\"><h2 style=\"margin:0 0 4px;color:#166534;\">Dataset Updated Successfully</h2><p style=\"margin:0;color:#6b7280;font-size:14px;\">File: <strong>{{ $json.file_name }}</strong></p></div><p>Your file was automatically matched and ingested into dataset <strong>{{ $json.dataset_name }}</strong>.</p><p><strong>Rows inserted: {{ $json.rows_inserted }}</strong></p><p style=\"color:#9ca3af;font-size:12px;margin-top:24px;\">DataPilot automated ingestion</p></body></html>",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000007",
+      "name": "Send: Auto Success",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1440, -120],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.sender_email }}",
+        "subject": "=Action Required: Choose dataset for {{ $json.file_name }}",
+        "emailType": "html",
+        "message": "={{ $json.choice_email_html }}",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000008",
+      "name": "Send: Choice Request",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1440, 160],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.sender_email }}",
+        "subject": "No Datasets Found for Your Account",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html><html><body style=\"font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#111;max-width:600px;margin:0 auto;padding:24px;\"><div style=\"border-left:4px solid #d97706;padding-left:16px;margin-bottom:24px;\"><h2 style=\"margin:0 0 4px;color:#92400e;\">No Datasets Found</h2></div><p>We received <strong>{{ $json.file_name }}</strong> but no datasets are registered to <strong>{{ $json.sender_email }}</strong>.</p><p>Please contact your DataPilot administrator.</p><p style=\"color:#9ca3af;font-size:12px;margin-top:24px;\">DataPilot automated ingestion</p></body></html>",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000009",
+      "name": "Send: No Datasets",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1440, 440],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.sender_email }}",
+        "subject": "=Ingestion Failed: {{ $json.file_name }}",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html><html><body style=\"font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#111;max-width:600px;margin:0 auto;padding:24px;\"><div style=\"border-left:4px solid #dc2626;padding-left:16px;margin-bottom:24px;\"><h2 style=\"margin:0 0 4px;color:#991b1b;\">Ingestion Failed</h2></div><p>We could not process <strong>{{ $json.file_name }}</strong>.</p><p style=\"background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;\"><strong>Error:</strong> {{ $json.message }}</p><p style=\"color:#9ca3af;font-size:12px;margin-top:24px;\">DataPilot automated ingestion</p></body></html>",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000010",
+      "name": "Send: Ingest Error",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1440, 700],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://data.ede-lee.ca/mcp-n8n/email-ingestion/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-secret",
+              "value": "950af2021e79797e4bf848e3d0ad7754e8172adbef38f5559d11470ffb3ab757"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "sender_email", "value": "={{ $json.sender_email }}" },
+            { "name": "in_reply_to",  "value": "={{ $json.in_reply_to }}" },
+            { "name": "body_text",    "value": "={{ $json.body_text }}" }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "a1000000-0000-0000-0000-000000000011",
+      "name": "POST /email-ingestion/reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [720, 500]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.status }}",
+        "rules": {
+          "rules": [
+            { "value2": "ok" }
+          ]
+        },
+        "fallbackOutput": 1
+      },
+      "id": "a1000000-0000-0000-0000-000000000012",
+      "name": "Route by Reply Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [960, 500]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.sender_email }}",
+        "subject": "=Dataset Updated: {{ $json.dataset_name }}",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html><html><body style=\"font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#111;max-width:600px;margin:0 auto;padding:24px;\"><div style=\"border-left:4px solid #16a34a;padding-left:16px;margin-bottom:24px;\"><h2 style=\"margin:0 0 4px;color:#166534;\">Dataset Updated Successfully</h2></div><p>Your chosen dataset <strong>{{ $json.dataset_name }}</strong> has been updated.</p><p><strong>Rows inserted: {{ $json.rows_inserted }}</strong></p><p style=\"color:#9ca3af;font-size:12px;margin-top:24px;\">DataPilot automated ingestion</p></body></html>",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000013",
+      "name": "Send: Reply Success",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1200, 400],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "sendTo": "={{ $json.sender_email }}",
+        "subject": "Could Not Process Your Reply",
+        "emailType": "html",
+        "message": "=<!DOCTYPE html><html><body style=\"font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;color:#111;max-width:600px;margin:0 auto;padding:24px;\"><div style=\"border-left:4px solid #dc2626;padding-left:16px;margin-bottom:24px;\"><h2 style=\"margin:0 0 4px;color:#991b1b;\">Reply Not Processed</h2></div><p style=\"background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;\">{{ $json.message }}</p><p>Please reply with just the number <strong>1</strong>, <strong>2</strong>, or <strong>3</strong>.</p><p style=\"color:#9ca3af;font-size:12px;margin-top:24px;\">DataPilot automated ingestion</p></body></html>",
+        "options": {}
+      },
+      "id": "a1000000-0000-0000-0000-000000000014",
+      "name": "Send: Reply Error",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1200, 620],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_WITH_GMAIL_CRED_ID",
+          "name": "Gmail account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [{ "node": "Classify Email", "type": "main", "index": 0 }]
+      ]
+    },
+    "Classify Email": {
+      "main": [
+        [{ "node": "Route by Email Type", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Email Type": {
+      "main": [
+        [{ "node": "POST /email-ingestion/process", "type": "main", "index": 0 }],
+        [{ "node": "POST /email-ingestion/reply",   "type": "main", "index": 0 }]
+      ]
+    },
+    "POST /email-ingestion/process": {
+      "main": [
+        [{ "node": "Route by Ingest Action", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Ingest Action": {
+      "main": [
+        [{ "node": "Send: Auto Success",  "type": "main", "index": 0 }],
+        [{ "node": "Build Choice Email",  "type": "main", "index": 0 }],
+        [{ "node": "Send: No Datasets",   "type": "main", "index": 0 }],
+        [{ "node": "Send: Ingest Error",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Build Choice Email": {
+      "main": [
+        [{ "node": "Send: Choice Request", "type": "main", "index": 0 }]
+      ]
+    },
+    "POST /email-ingestion/reply": {
+      "main": [
+        [{ "node": "Route by Reply Status", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Reply Status": {
+      "main": [
+        [{ "node": "Send: Reply Success", "type": "main", "index": 0 }],
+        [{ "node": "Send: Reply Error",   "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": [
+    { "name": "AI-DEV" }
+  ]
+}

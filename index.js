@@ -2112,6 +2112,277 @@ app.post('/ingestion/log', async (req, res) => {
   } finally { client.release(); }
 });
 
+// ── Email Ingestion ────────────────────────────────────────────────────────────
+
+/**
+ * matchDatasets — uses OpenRouter AI to score file headers against candidate datasets.
+ * Returns array sorted by confidence desc: [{dataset_id, dataset_name, confidence, reason}]
+ */
+async function matchDatasets(fileHeaders, datasets) {
+  const datasetList = datasets.map(d => {
+    const mapping = typeof d.column_mapping === 'string'
+      ? JSON.parse(d.column_mapping || '{}')
+      : (d.column_mapping || {});
+    return `- Name: "${d.dataset_name}" | ID: ${d.dataset_id} | Columns: ${JSON.stringify(Object.keys(mapping))}`;
+  }).join('\n');
+
+  const prompt = `You are a data matching assistant. Given a set of file headers and candidate datasets, score how well the file's columns match each dataset's columns.
+
+File headers: ${JSON.stringify(fileHeaders)}
+
+Candidate datasets:
+${datasetList}
+
+Return ONLY a valid JSON array (no markdown, no explanation), sorted by confidence descending:
+[{"dataset_id":"...","dataset_name":"...","confidence":85,"reason":"..."}]
+
+Confidence is 0-100. A score >=90 means the file clearly belongs to that dataset.`;
+
+  const response = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
+      model: 'deepseek/deepseek-chat',
+      max_tokens: 1024,
+      messages: [{ role: 'user', content: prompt }]
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    }
+  );
+
+  const text = response.data.choices[0].message.content.trim();
+  // Strip markdown code fences if present
+  const json = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  return JSON.parse(json);
+}
+
+/**
+ * processEmailIngestion — converts stored csv_data into a dataset update.
+ * Reuses the same update-dataset webhook + ingestion log pattern as runIngestion().
+ */
+async function processEmailIngestion(requestId, datasetId, pgClient) {
+  await pgClient.query(
+    `UPDATE n8n_data.email_ingestion_requests
+     SET status='processing', chosen_dataset_id=$1, updated_at=now() WHERE id=$2`,
+    [datasetId, requestId]
+  );
+
+  const { rows } = await pgClient.query(
+    `SELECT * FROM n8n_data.email_ingestion_requests WHERE id=$1`, [requestId]
+  );
+  const req = rows[0];
+
+  // Validate columns against saved dataset_headers
+  const dsRow = await pgClient.query(
+    `SELECT dataset_headers, dataset_name FROM n8n_data.dataset_record_manager WHERE dataset_id=$1`,
+    [datasetId]
+  );
+  if (!dsRow.rows.length) throw new Error('Dataset not found');
+  const { dataset_headers: savedHeaders, dataset_name: datasetName } = dsRow.rows[0];
+
+  if (savedHeaders && savedHeaders.length > 0) {
+    const cleanCsv = Buffer.from(req.csv_data, 'base64').toString('utf8');
+    const incomingHeaders = cleanCsv.split('\n')[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
+    const missingCols = savedHeaders.filter(h => !incomingHeaders.includes(h));
+    if (missingCols.length > 0) {
+      throw new Error(`Format mismatch — missing columns: [${missingCols.join(', ')}]`);
+    }
+  }
+
+  // Upload via update-dataset n8n webhook (same as runIngestion step 12)
+  const n8nBase = N8N_BASE.replace(/\/$/, '');
+  const updateResp = await axios.post(
+    `${n8nBase}/webhook/update-dataset`,
+    { datasetId, email: req.sender_email, csvData: req.csv_data, fileName: req.file_name },
+    { headers: { 'X-N8N-API-KEY': N8N_API_KEY, 'Content-Type': 'application/json' }, timeout: 300000 }
+  );
+  const updateResult = updateResp.data;
+  if (updateResult.status !== 'ok') throw new Error(updateResult.message || 'Dataset update failed');
+  const rowsInserted = updateResult.rowsInserted || null;
+
+  // Mark completed
+  await pgClient.query(
+    `UPDATE n8n_data.email_ingestion_requests
+     SET status='completed', result_rows_inserted=$1, updated_at=now() WHERE id=$2`,
+    [rowsInserted, requestId]
+  );
+
+  // Log to dataset_ingestion_files
+  await pgClient.query(
+    `INSERT INTO n8n_data.dataset_ingestion_files
+       (dataset_id, file_name, location_type, ingested_at, ingestion_result, rows_inserted)
+     VALUES ($1, $2, 'email', now(), 'success', $3)`,
+    [datasetId, req.file_name, rowsInserted]
+  );
+
+  return { rowsInserted, datasetName };
+}
+
+// POST /email-ingestion/process
+// Called by n8n IMAP workflow when a new email with a compatible file attachment arrives.
+// Body: { sender_email, message_id, subject, file_name, file_buffer (base64 raw file) }
+app.post('/email-ingestion/process', async (req, res) => {
+  const pgClient = await pgPool.connect();
+  try {
+    const { sender_email, message_id, subject, file_name, file_buffer } = req.body;
+    if (!sender_email || !message_id || !file_name || !file_buffer) {
+      return res.status(400).json({ status: 'error', message: 'Missing required fields' });
+    }
+
+    // 1. Find datasets owned by this sender
+    const dsResult = await pgClient.query(
+      `SELECT dataset_id, dataset_name, column_mapping
+       FROM n8n_data.dataset_record_manager WHERE owner_email=$1`,
+      [sender_email]
+    );
+
+    if (!dsResult.rows.length) {
+      await pgClient.query(
+        `INSERT INTO n8n_data.email_ingestion_requests
+           (sender_email, message_id, subject, file_name, status)
+         VALUES ($1,$2,$3,$4,'no_datasets')`,
+        [sender_email, message_id, subject, file_name]
+      );
+      return res.json({ status: 'ok', action: 'no_datasets', sender_email, file_name });
+    }
+
+    // 2. Convert file via excel-to-sql service
+    const fileBuffer = Buffer.from(file_buffer, 'base64');
+    const formData = new FormData();
+    formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), file_name);
+    const convertResp = await fetch(`${EXCEL_TO_SQL_URL}/convert`, { method: 'POST', body: formData });
+    if (!convertResp.ok) {
+      const errText = await convertResp.text();
+      throw new Error(`Conversion service error ${convertResp.status}: ${errText}`);
+    }
+
+    // 3. Extract clean CSV from ZIP
+    const zipBuffer = await convertResp.arrayBuffer();
+    const zip = await JSZip.loadAsync(zipBuffer);
+    let cleanCsv = null;
+    for (const [filename, fileObj] of Object.entries(zip.files)) {
+      if (filename.endsWith('_clean.csv')) {
+        cleanCsv = await fileObj.async('string');
+        break;
+      }
+    }
+    if (!cleanCsv) throw new Error('Conversion service did not return a clean CSV');
+    const csvBase64 = Buffer.from(cleanCsv).toString('base64');
+
+    // 4. Parse file headers
+    const fileHeaders = cleanCsv.split('\n')[0].split(',').map(h => h.replace(/^"|"$/g, '').trim());
+
+    // 5. AI match against candidate datasets
+    const matches = await matchDatasets(fileHeaders, dsResult.rows);
+
+    // 6. Store request record (pending_choice initially; may be updated to completed immediately)
+    const { rows: inserted } = await pgClient.query(
+      `INSERT INTO n8n_data.email_ingestion_requests
+         (sender_email, message_id, subject, file_name, csv_data, candidate_datasets, status)
+       VALUES ($1,$2,$3,$4,$5,$6,'pending_choice') RETURNING id`,
+      [sender_email, message_id, subject, file_name, csvBase64, JSON.stringify(matches)]
+    );
+    const requestId = inserted[0].id;
+
+    // 7. Auto-proceed if top match confidence >= 90%
+    if (matches[0]?.confidence >= 90) {
+      const result = await processEmailIngestion(requestId, matches[0].dataset_id, pgClient);
+      return res.json({
+        status: 'ok',
+        action: 'auto_proceed',
+        sender_email,
+        file_name,
+        dataset_name: result.datasetName,
+        rows_inserted: result.rowsInserted
+      });
+    }
+
+    // 8. Return top 3 candidates for user to choose
+    return res.json({
+      status: 'ok',
+      action: 'awaiting_choice',
+      sender_email,
+      file_name,
+      request_id: requestId,
+      candidates: matches.slice(0, 3)
+    });
+
+  } catch (err) {
+    console.error('email-ingestion/process error:', err.message);
+    return res.status(500).json({ status: 'error', message: err.message, sender_email, file_name });
+  } finally {
+    pgClient.release();
+  }
+});
+
+// POST /email-ingestion/reply
+// Called by n8n when the user replies with their dataset choice (1, 2, or 3).
+// Body: { sender_email, in_reply_to (Message-ID of original email), body_text }
+app.post('/email-ingestion/reply', async (req, res) => {
+  const pgClient = await pgPool.connect();
+  try {
+    const { sender_email, in_reply_to, body_text } = req.body;
+    if (!sender_email || !body_text) {
+      return res.status(400).json({ status: 'error', message: 'Missing required fields' });
+    }
+
+    // Find most recent pending request from this sender.
+    // We don't rely on exact message_id matching because the user may reply
+    // to our choice email (different Message-ID) rather than the original.
+    const { rows } = await pgClient.query(
+      `SELECT * FROM n8n_data.email_ingestion_requests
+       WHERE sender_email=$1 AND status='pending_choice'
+       ORDER BY created_at DESC LIMIT 1`,
+      [sender_email]
+    );
+    if (!rows.length) {
+      return res.json({ status: 'error', message: 'No pending dataset choice found for your account', sender_email });
+    }
+    const pending = rows[0];
+    const candidates = pending.candidate_datasets;
+
+    // Extract numeric choice (1/2/3) from reply body
+    const choiceMatch = body_text.match(/\b([123])\b/);
+    const choice = choiceMatch ? parseInt(choiceMatch[1]) : null;
+    if (!choice || !candidates[choice - 1]) {
+      return res.json({ status: 'error', message: 'Could not determine a valid choice (1, 2, or 3) from your reply', sender_email });
+    }
+
+    const result = await processEmailIngestion(pending.id, candidates[choice - 1].dataset_id, pgClient);
+    return res.json({ status: 'ok', sender_email, dataset_name: result.datasetName, rows_inserted: result.rowsInserted });
+
+  } catch (err) {
+    console.error('email-ingestion/reply error:', err.message);
+    return res.status(500).json({ status: 'error', message: err.message, sender_email });
+  } finally {
+    pgClient.release();
+  }
+});
+
+// GET /email-ingestion/requests?email=...
+// Returns email ingestion history for a given user (for future UI).
+app.get('/email-ingestion/requests', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ status: 'error', message: 'email required' });
+  const pgClient = await pgPool.connect();
+  try {
+    const { rows } = await pgClient.query(
+      `SELECT id, file_name, subject, status, candidate_datasets, chosen_dataset_id,
+              result_rows_inserted, error_message, created_at
+       FROM n8n_data.email_ingestion_requests
+       WHERE sender_email=$1 ORDER BY created_at DESC LIMIT 50`,
+      [email]
+    );
+    return res.json({ status: 'ok', requests: rows });
+  } finally {
+    pgClient.release();
+  }
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 app.get('/', (req, res) => res.send('mcp-n8n server running'));
