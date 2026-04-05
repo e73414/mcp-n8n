@@ -1807,6 +1807,7 @@ app.get('/google/sheets/csv', async (req, res) => {
     res.setHeader('Content-Type', 'text/csv');
     res.send(response.data);
   } catch (err) {
+    console.error('google/sheets/csv error:', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
