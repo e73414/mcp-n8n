@@ -2257,7 +2257,9 @@ app.post('/email-ingestion/process', async (req, res) => {
     let cleanCsv = null;
     if (file_name.toLowerCase().endsWith('.csv')) {
       // Already a CSV — use directly, normalising line endings
-      cleanCsv = fileBuffer.toString('utf8').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const rawStr = fileBuffer.toString('utf8');
+      console.log(`email-ingestion: raw CSV first 300 chars: ${JSON.stringify(rawStr.slice(0, 300))}`);
+      cleanCsv = rawStr.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     } else {
       const formData = new FormData();
       formData.append('file', new Blob([fileBuffer], { type: 'application/octet-stream' }), file_name);
