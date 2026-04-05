@@ -1800,6 +1800,7 @@ app.get('/google/sheets/csv', async (req, res) => {
     const oauth2Client = await getValidAccessToken(email, client);
     const credentials = oauth2Client.credentials;
     const exportUrl = `https://docs.google.com/spreadsheets/d/${sheet_id}/export?format=csv${gid ? `&gid=${gid}` : ''}`;
+    console.log('google/sheets/csv: fetching', exportUrl, 'token prefix:', credentials.access_token?.slice(0, 20));
     const response = await axios.get(exportUrl, {
       headers: { Authorization: `Bearer ${credentials.access_token}` },
       responseType: 'text',
@@ -1807,8 +1808,9 @@ app.get('/google/sheets/csv', async (req, res) => {
     res.setHeader('Content-Type', 'text/csv');
     res.send(response.data);
   } catch (err) {
-    console.error('google/sheets/csv error:', err.message);
-    res.status(500).json({ error: err.message });
+    const detail = err.response ? `HTTP ${err.response.status}: ${String(err.response.data).slice(0, 200)}` : err.message;
+    console.error('google/sheets/csv error:', detail);
+    res.status(500).json({ error: detail });
   } finally { client.release(); }
 });
 
