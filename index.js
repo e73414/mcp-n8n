@@ -2379,7 +2379,40 @@ app.post('/email-ingestion/process', (req, res, next) => {
 
   } catch (err) {
     console.error('email-ingestion/process error:', err.message);
+    // Log failed attempt to email_ingestion_requests if we have enough info
+    try {
+      const se = req.body.sender_email;
+      const fn = req.body.file_name || (req.file && req.file.originalname);
+      if (se) {
+        await pgClient.query(
+          `INSERT INTO n8n_data.email_ingestion_requests
+             (sender_email, message_id, subject, file_name, chosen_dataset_id, status, error_message)
+           VALUES ($1,$2,$3,$4,$5,'failed',$6)
+           ON CONFLICT DO NOTHING`,
+          [se, req.body.message_id || '', req.body.subject || '', fn || null, req.body.dataset_id || null, err.message]
+        );
+      }
+    } catch (_) {}
     return res.status(500).json({ status: 'error', message: err.message, sender_email: req.body.sender_email, file_name: req.body.file_name });
+  } finally {
+    pgClient.release();
+  }
+});
+
+// POST /email-ingestion/no-match
+// Called by n8n when no matching dataset was found for an emailed file.
+app.post('/email-ingestion/no-match', async (req, res) => {
+  const { sender_email, message_id = '', subject = '', file_name = null } = req.body;
+  if (!sender_email) return res.status(400).json({ status: 'error', message: 'sender_email required' });
+  const pgClient = await pgPool.connect();
+  try {
+    await pgClient.query(
+      `INSERT INTO n8n_data.email_ingestion_requests
+         (sender_email, message_id, subject, file_name, status)
+       VALUES ($1,$2,$3,$4,'no_datasets')`,
+      [sender_email, message_id, subject, file_name]
+    );
+    return res.json({ status: 'ok' });
   } finally {
     pgClient.release();
   }
