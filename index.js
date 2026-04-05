@@ -2298,8 +2298,11 @@ app.post('/email-ingestion/process', async (req, res) => {
     );
     const updateResult = updateResp.data;
     console.log('update-dataset response:', JSON.stringify(updateResult));
-    if (updateResult.status !== 'ok') throw new Error(updateResult.message || `Dataset update failed (response: ${JSON.stringify(updateResult)})`);
-    const rowsInserted = updateResult.rowsInserted || null;
+    // Treat 2xx as success even if body is empty (webhook may use "Respond immediately" mode)
+    if (updateResult && updateResult.status && updateResult.status !== 'ok') {
+      throw new Error(updateResult.message || `Dataset update failed (response: ${JSON.stringify(updateResult)})`);
+    }
+    const rowsInserted = updateResult?.rowsInserted || null;
 
     // 7. Mark completed in email_ingestion_requests
     await pgClient.query(
