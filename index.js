@@ -2401,8 +2401,15 @@ app.post('/email-ingestion/process', (req, res, next) => {
 
 // POST /email-ingestion/no-match
 // Called by n8n when no matching dataset was found for an emailed file.
-app.post('/email-ingestion/no-match', async (req, res) => {
-  const { sender_email, message_id = '', subject = '', file_name = null } = req.body;
+app.post('/email-ingestion/no-match', (req, res, next) => {
+  const ct = req.headers['content-type'] || '';
+  if (ct.includes('multipart/form-data')) multerMemory.none()(req, res, next);
+  else next();
+}, async (req, res) => {
+  const sender_email = req.body.sender_email;
+  const message_id   = req.body.message_id  || '';
+  const subject      = req.body.subject     || '';
+  const file_name    = req.body.file_name   || null;
   if (!sender_email) return res.status(400).json({ status: 'error', message: 'sender_email required' });
   const pgClient = await pgPool.connect();
   try {
