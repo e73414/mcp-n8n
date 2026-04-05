@@ -2297,7 +2297,8 @@ app.post('/email-ingestion/process', async (req, res) => {
       { headers: { 'X-N8N-API-KEY': N8N_API_KEY, 'Content-Type': 'application/json' }, timeout: 300000 }
     );
     const updateResult = updateResp.data;
-    if (updateResult.status !== 'ok') throw new Error(updateResult.message || 'Dataset update failed');
+    console.log('update-dataset response:', JSON.stringify(updateResult));
+    if (updateResult.status !== 'ok') throw new Error(updateResult.message || `Dataset update failed (response: ${JSON.stringify(updateResult)})`);
     const rowsInserted = updateResult.rowsInserted || null;
 
     // 7. Mark completed in email_ingestion_requests
