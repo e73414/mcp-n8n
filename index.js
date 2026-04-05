@@ -1799,14 +1799,25 @@ app.get('/google/sheets/csv', async (req, res) => {
   try {
     const oauth2Client = await getValidAccessToken(email, client);
     const credentials = oauth2Client.credentials;
-    const exportUrl = `https://docs.google.com/spreadsheets/d/${sheet_id}/export?format=csv${gid ? `&gid=${gid}` : ''}`;
-    console.log('google/sheets/csv: fetching', exportUrl, 'token prefix:', credentials.access_token?.slice(0, 20));
-    const response = await axios.get(exportUrl, {
+    // Export as xlsx (more reliable than csv for Google Sheets) then extract first sheet CSV
+    const exportUrl = `https://docs.google.com/spreadsheets/d/${sheet_id}/export?format=xlsx`;
+    const dlResp = await axios.get(exportUrl, {
       headers: { Authorization: `Bearer ${credentials.access_token}` },
-      responseType: 'text',
+      responseType: 'arraybuffer',
     });
+    // Extract _clean.csv via excel-to-sql
+    const formData = new FormData();
+    formData.append('file', new Blob([dlResp.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 'sheet.xlsx');
+    const convertResp = await fetch(`${EXCEL_TO_SQL_URL}/convert`, { method: 'POST', body: formData });
+    if (!convertResp.ok) throw new Error(`Conversion failed: ${convertResp.status}`);
+    const zip = await JSZip.loadAsync(await convertResp.arrayBuffer());
+    let csvText = null;
+    for (const [filename, fileObj] of Object.entries(zip.files)) {
+      if (filename.endsWith('_clean.csv')) { csvText = await fileObj.async('string'); break; }
+    }
+    if (!csvText) throw new Error('No CSV extracted from sheet');
     res.setHeader('Content-Type', 'text/csv');
-    res.send(response.data);
+    res.send(csvText);
   } catch (err) {
     const detail = err.response ? `HTTP ${err.response.status}: ${String(err.response.data).slice(0, 200)}` : err.message;
     console.error('google/sheets/csv error:', detail);
