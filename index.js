@@ -2123,7 +2123,12 @@ async function matchDatasets(fileHeaders, datasets) {
     const mapping = typeof d.column_mapping === 'string'
       ? JSON.parse(d.column_mapping || '{}')
       : (d.column_mapping || {});
-    return `- Name: "${d.dataset_name}" | ID: ${d.dataset_id} | Columns: ${JSON.stringify(Object.keys(mapping))}`;
+    // Prefer original header names from column_mapping keys; fall back to dataset_headers array
+    let columns = Object.keys(mapping);
+    if (!columns.length && d.dataset_headers) {
+      columns = Array.isArray(d.dataset_headers) ? d.dataset_headers : Object.keys(d.dataset_headers);
+    }
+    return `- Name: "${d.dataset_name}" | ID: ${d.dataset_id} | Columns: ${JSON.stringify(columns)}`;
   }).join('\n');
 
   const prompt = `You are a data matching assistant. Given a set of file headers and candidate datasets, score how well the file's columns match each dataset's columns.
@@ -2233,10 +2238,10 @@ app.post('/email-ingestion/process', async (req, res) => {
       return res.status(400).json({ status: 'error', message: 'Missing required fields' });
     }
 
-    // 1. Find datasets owned by this sender
+    // 1. Find datasets owned by this sender (case-insensitive email match)
     const dsResult = await pgClient.query(
-      `SELECT dataset_id, dataset_name, column_mapping
-       FROM n8n_data.dataset_record_manager WHERE owner_email=$1`,
+      `SELECT dataset_id, dataset_name, column_mapping, dataset_headers
+       FROM n8n_data.dataset_record_manager WHERE LOWER(owner_email)=LOWER($1)`,
       [sender_email]
     );
 
