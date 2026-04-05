@@ -6,6 +6,8 @@ const { Pool } = require('pg');
 const { google } = require('googleapis');
 const cron = require('node-cron');
 const JSZip = require('jszip');
+const multer = require('multer');
+const multerMemory = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const app = express();
 app.use(cors());
@@ -2229,14 +2231,40 @@ async function processEmailIngestion(requestId, datasetId, pgClient) {
 
 // POST /email-ingestion/process
 // Called by n8n after it has already determined the target dataset_id.
-// Body: { dataset_id, sender_email, file_name, file_buffer (base64 raw file), message_id?, subject? }
-app.post('/email-ingestion/process', async (req, res) => {
+// Accepts multipart/form-data (file as binary upload) OR JSON with base64 file_buffer.
+app.post('/email-ingestion/process', (req, res, next) => {
+  const ct = req.headers['content-type'] || '';
+  if (ct.includes('multipart/form-data')) {
+    multerMemory.single('file')(req, res, next);
+  } else {
+    next();
+  }
+}, async (req, res) => {
   const pgClient = await pgPool.connect();
   try {
-    const { dataset_id, sender_email, file_name, file_buffer, message_id = '', subject = '' } = req.body;
-    if (!dataset_id || !sender_email || !file_name || !file_buffer) {
-      return res.status(400).json({ status: 'error', message: 'Missing required fields: dataset_id, sender_email, file_name, file_buffer' });
+    const dataset_id   = req.body.dataset_id;
+    const sender_email = req.body.sender_email;
+    const message_id   = req.body.message_id || '';
+    const subject      = req.body.subject    || '';
+
+    // File comes as multipart upload (req.file) or JSON base64 field
+    let fileBuffer, file_name;
+    if (req.file) {
+      fileBuffer = req.file.buffer;
+      file_name  = req.body.file_name || req.file.originalname;
+    } else {
+      file_name = req.body.file_name;
+      const raw = req.body.file_buffer;
+      if (!raw || String(raw).startsWith('filesystem-v2')) {
+        return res.status(400).json({ status: 'error', message: 'file_buffer contains n8n filesystem reference — send file as multipart/form-data instead' });
+      }
+      fileBuffer = Buffer.from(raw, 'base64');
     }
+
+    if (!dataset_id || !sender_email || !file_name || !fileBuffer?.length) {
+      return res.status(400).json({ status: 'error', message: 'Missing required fields: dataset_id, sender_email, file_name, and file (multipart) or file_buffer (base64)' });
+    }
+    console.log(`email-ingestion: received file ${file_name}, size ${fileBuffer.length} bytes`);
 
     // 1. Look up dataset name and saved headers for validation
     const dsRow = await pgClient.query(
@@ -2247,12 +2275,6 @@ app.post('/email-ingestion/process', async (req, res) => {
       return res.status(404).json({ status: 'error', message: `Dataset not found: ${dataset_id}` });
     }
     const { dataset_name: datasetName, dataset_headers: savedHeaders } = dsRow.rows[0];
-
-    // 2. Decode file buffer and validate it has content
-    console.log(`email-ingestion: file_buffer type=${typeof file_buffer}, length=${file_buffer?.length}, first 100: ${JSON.stringify(String(file_buffer).slice(0, 100))}`);
-    const fileBuffer = Buffer.from(file_buffer, 'base64');
-    if (fileBuffer.length === 0) throw new Error('file_buffer decoded to empty — binary data may not have been passed correctly from n8n');
-    console.log(`email-ingestion: received file ${file_name}, decoded size ${fileBuffer.length} bytes`);
 
     // 3. Convert file via excel-to-sql service (or use raw content if already a CSV)
     let cleanCsv = null;
