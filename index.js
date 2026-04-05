@@ -2440,7 +2440,7 @@ app.get('/email-ingestion/requests', async (req, res) => {
       `SELECT id, file_name, subject, status, candidate_datasets, chosen_dataset_id,
               result_rows_inserted, error_message, created_at
        FROM n8n_data.email_ingestion_requests
-       WHERE sender_email=$1 ORDER BY created_at DESC LIMIT 50`,
+       WHERE LOWER(sender_email)=LOWER($1) ORDER BY created_at DESC`,
       [email]
     );
     return res.json({ status: 'ok', requests: rows });
