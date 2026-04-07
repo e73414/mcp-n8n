@@ -683,7 +683,7 @@ app.get('/report-schedules', async (req, res) => {
     const isUserAdmin = await isAdmin(userEmail, client);
 
     let query = 'SELECT * FROM n8n_data.report_schedules';
-    const params: any[] = [];
+    const params = [];
 
     if (!isUserAdmin && !showAll) {
       query += ' WHERE user_email = $1';
@@ -751,8 +751,8 @@ app.patch('/report-schedules/:id', async (req, res) => {
       return;
     }
 
-    const updates: string[] = [];
-    const values: any[] = [];
+    const updates = [];
+    const values = [];
     let paramIdx = 1;
 
     if (enabled !== undefined) { updates.push(`enabled = $${paramIdx++}`); values.push(enabled); }
