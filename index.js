@@ -1988,6 +1988,19 @@ function startReportScheduler() {
   console.log('Report scheduler started');
 }
 
+// Helper: call the local /mcp/execute endpoint (same path the frontend uses)
+async function mcpExecute(webhookPath, input) {
+  const localUrl = `http://localhost:${process.env.PORT || 3000}/mcp/execute`;
+  const resp = await axios.post(localUrl, {
+    skill: 'n8n-webhook',
+    params: { webhookPath },
+    input,
+  }, {
+    headers: { 'x-api-secret': API_SECRET },
+  });
+  return resp.data;
+}
+
 async function executeScheduledReport(schedule, client) {
   try {
     // 1. Fetch the original conversation/prompt
@@ -2004,103 +2017,96 @@ async function executeScheduledReport(schedule, client) {
     const promptMatch = originalConv.prompt.match(/^\[.*?\]\s*(.*)$/s);
     const originalPrompt = promptMatch ? promptMatch[1] : originalConv.prompt;
 
-    // 2. Call planReport webhook
+    // 2. Plan report via /mcp/execute
     console.log(`[Report ${schedule.id}] Starting plan generation...`);
-    const planResp = await axios.post(`${process.env.N8N_BASE_URL}/webhook/plan-report`, {
+    const planData = await mcpExecute('webhook/plan-report', {
       prompt: originalPrompt,
       email: schedule.user_email,
       dataset_ids: schedule.dataset_ids.split(',').map(id => id.trim()).filter(id => id !== 'all'),
-      model: schedule.plan_model
+      model: schedule.plan_model,
     });
 
-    if (planResp.data.status !== 'ok' || !planResp.data.plan) {
-      throw new Error(`Plan generation failed: ${planResp.data.message || 'Unknown error'}`);
+    if (planData.status === 'error' || !planData.plan) {
+      throw new Error(`Plan generation failed: ${planData.error || planData.message || JSON.stringify(planData)}`);
     }
 
-    const plan = planResp.data.plan;
+    const plan = planData.plan;
 
-    // 3. Call executePlan webhook (async)
+    // 3. Execute plan via /mcp/execute
     console.log(`[Report ${schedule.id}] Starting plan execution...`);
-    const execResp = await axios.post(`${process.env.N8N_BASE_URL}/webhook/execute-plan`, {
+    const execData = await mcpExecute('webhook/execute-plan', {
       plan: JSON.stringify(plan),
       email: schedule.user_email,
       model: schedule.execute_model,
-      templateId: schedule.template_id,
-      reportId: Math.random().toString(36).substring(7) // new report ID
+      ...(schedule.template_id && { templateId: schedule.template_id }),
     });
 
-    if (execResp.data.status !== 'ok' || !execResp.data.report_id) {
-      throw new Error(`Plan execution failed: ${execResp.data.message || 'Unknown error'}`);
+    // Extract report_id from response (same nested structure as frontend)
+    let reportId = execData.report_id;
+    if (!reportId && execData.data) {
+      const raw = typeof execData.data === 'string' ? JSON.parse(execData.data) : execData.data;
+      reportId = (Array.isArray(raw) ? raw[0] : raw)?.report_id;
     }
 
-    const reportId = execResp.data.report_id;
+    if (!reportId) {
+      throw new Error(`Execute plan failed: no report_id returned. Response: ${JSON.stringify(execData)}`);
+    }
 
-    // 4. Poll checkReportProgress until complete (max 60 iterations, 5-sec intervals = 5 minutes max)
+    // 4. Poll checkReportProgress via /mcp/execute (max 60 iterations, 5-sec intervals = 5 minutes max)
     console.log(`[Report ${schedule.id}] Polling progress for report ${reportId}...`);
-    let reportProgress;
     let attempts = 0;
     const maxAttempts = 60;
 
     while (attempts < maxAttempts) {
+      await new Promise(r => setTimeout(r, 5000));
       try {
-        reportProgress = await axios.post(`${process.env.N8N_BASE_URL}/webhook/check-report-progress`, {
-          report_id: reportId
-        });
-
-        if (reportProgress.data.status === 'completed') {
+        const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
+        const status = progressData.status || (Array.isArray(progressData.data) ? progressData.data[0]?.status : progressData.data?.status);
+        console.log(`[Report ${schedule.id}] Progress status: ${status}`);
+        if (status === 'completed') {
           console.log(`[Report ${schedule.id}] Report completed`);
           break;
-        } else if (reportProgress.data.status === 'error') {
-          throw new Error(`Report execution error: ${reportProgress.data.message || 'Unknown error'}`);
+        } else if (status === 'error') {
+          throw new Error(`Report execution error from progress check`);
         }
-
-        // Wait 5 seconds before next poll
-        await new Promise(r => setTimeout(r, 5000));
-        attempts++;
       } catch (err) {
-        if (attempts < maxAttempts) {
-          console.log(`[Report ${schedule.id}] Poll attempt ${attempts + 1} failed, retrying...`);
-          await new Promise(r => setTimeout(r, 5000));
-          attempts++;
-        } else {
-          throw err;
-        }
+        console.log(`[Report ${schedule.id}] Poll attempt ${attempts + 1} error: ${err.message}`);
       }
+      attempts++;
     }
 
     if (attempts >= maxAttempts) {
       throw new Error('Report execution timeout after 5 minutes');
     }
 
-    // 5. Call runFormatter to generate HTML
+    // 5. Run formatter via /mcp/execute
     console.log(`[Report ${schedule.id}] Running formatter...`);
-    await axios.post(`${process.env.N8N_BASE_URL}/webhook/run-formatter`, {
-      reportId: reportId,
+    await mcpExecute('webhook/run-formatter', {
+      reportId,
       email: schedule.user_email,
       model: schedule.execute_model,
-      templateId: schedule.template_id,
-      detailLevel: schedule.detail_level,
-      reportDetail: schedule.report_detail,
-      produceReport: 'Yes'
+      ...(schedule.template_id && { templateId: schedule.template_id }),
+      ...(schedule.detail_level && { detailLevel: schedule.detail_level }),
+      ...(schedule.report_detail && { reportDetail: schedule.report_detail }),
+      produceReport: 'Yes',
     });
 
-    // 6. Fetch the final HTML report
+    // 6. Fetch the formatted report HTML from local /reports/:id/steps endpoint
     console.log(`[Report ${schedule.id}] Fetching formatted report...`);
-    const reportDataResp = await axios.get(`${process.env.N8N_BASE_URL}/reports/${reportId}/steps`);
+    const reportDataResp = await axios.get(
+      `http://localhost:${process.env.PORT || 3000}/reports/${reportId}/steps`,
+      { headers: { 'x-api-secret': process.env.API_SECRET || '' } }
+    );
 
-    // Extract HTML from report data
+    // Extract HTML — formatter stores it in the formatted_report step or as html field
     let htmlContent = '';
-    if (reportDataResp.data && typeof reportDataResp.data === 'string') {
-      htmlContent = reportDataResp.data;
-    } else if (reportDataResp.data && reportDataResp.data.html) {
-      htmlContent = reportDataResp.data.html;
+    const steps = reportDataResp.data?.steps || reportDataResp.data || [];
+    if (Array.isArray(steps)) {
+      const formatterStep = steps.find(s => s.step_type === 'formatter' || s.formatted_report);
+      htmlContent = formatterStep?.formatted_report || formatterStep?.result || '';
     }
-
-    if (!htmlContent) {
-      console.warn(`[Report ${schedule.id}] No HTML content in report response, attempting to fetch from temp tables...`);
-      // Fallback: try to construct HTML from temp report tables
-      htmlContent = `<p>Report execution completed. Report ID: ${reportId}</p>`;
-    }
+    if (!htmlContent && reportDataResp.data?.html) htmlContent = reportDataResp.data.html;
+    if (!htmlContent) htmlContent = `<p>Scheduled report completed. Report ID: ${reportId}</p>`;
 
     // 7. Save to conversation_history as a new record
     console.log(`[Report ${schedule.id}] Saving report to history...`);
