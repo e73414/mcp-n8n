@@ -1854,17 +1854,52 @@ async function loadAndScheduleAll() {
 
 // ── Report Scheduler ──────────────────────────────────────────────────────────
 
+// Returns true if the given cron expression matches the current minute
+function cronMatchesNow(cronExpr) {
+  const parts = cronExpr.trim().split(/\s+/);
+  if (parts.length !== 5) return false;
+  const [minutePart, hourPart, domPart, monthPart, dowPart] = parts;
+
+  const now = new Date();
+  const minute = now.getMinutes();
+  const hour = now.getHours();
+  const dom = now.getDate();
+  const month = now.getMonth() + 1; // 1-12
+  const dow = now.getDay(); // 0=Sun
+
+  function matchesPart(part, value) {
+    if (part === '*') return true;
+    if (part.includes(',')) return part.split(',').some(p => matchesPart(p.trim(), value));
+    if (part.includes('/')) {
+      const [range, step] = part.split('/');
+      const start = range === '*' ? 0 : parseInt(range);
+      return (value - start) % parseInt(step) === 0 && value >= start;
+    }
+    if (part.includes('-')) {
+      const [lo, hi] = part.split('-').map(Number);
+      return value >= lo && value <= hi;
+    }
+    return parseInt(part) === value;
+  }
+
+  return (
+    matchesPart(minutePart, minute) &&
+    matchesPart(hourPart, hour) &&
+    matchesPart(domPart, dom) &&
+    matchesPart(monthPart, month) &&
+    matchesPart(dowPart, dow)
+  );
+}
+
 function startReportScheduler() {
   // Every minute, check for due report schedules and execute them
   cron.schedule('* * * * *', async () => {
     const client = await pgPool.connect();
     try {
-      // Find enabled schedules where last_run_at is past the schedule time (or never run)
       const result = await client.query(`
         SELECT * FROM n8n_data.report_schedules
         WHERE enabled = true
           AND (last_run_status IS NULL OR last_run_status NOT LIKE 'running%')
-          AND (last_run_at IS NULL OR last_run_at < now() - interval '1 minute')
         ORDER BY created_at ASC
       `);
 
@@ -1874,26 +1909,26 @@ function startReportScheduler() {
           continue;
         }
 
-        // Check if the cron expression matches the current time
-        // Use a simple check: find next run time and see if it's within this minute
-        try {
-          const nextRunTime = cron.nextDate(schedule.schedule);
-          const now = new Date();
-          if (nextRunTime <= new Date(now.getTime() + 60000)) {
-            // Mark as running and execute
-            await client.query(
-              `UPDATE n8n_data.report_schedules SET last_run_status = $1 WHERE id = $2`,
-              ['running', schedule.id]
-            );
+        if (!cronMatchesNow(schedule.schedule)) continue;
 
-            // Execute asynchronously without blocking
-            executeScheduledReport(schedule, client).catch(err => {
-              console.error(`Scheduled report ${schedule.id} execution failed:`, err.message);
-            });
-          }
-        } catch (err) {
-          console.error(`Failed to check schedule ${schedule.id}:`, err.message);
+        // Prevent duplicate runs if last_run_at was within this minute
+        if (schedule.last_run_at) {
+          const lastRun = new Date(schedule.last_run_at);
+          const now = new Date();
+          const diffMs = now - lastRun;
+          if (diffMs < 60000) continue; // already ran this minute
         }
+
+        // Mark as running and execute
+        await client.query(
+          `UPDATE n8n_data.report_schedules SET last_run_status = $1 WHERE id = $2`,
+          ['running', schedule.id]
+        );
+
+        // Execute asynchronously without blocking the loop
+        executeScheduledReport(schedule, client).catch(err => {
+          console.error(`Scheduled report ${schedule.id} execution failed:`, err.message);
+        });
       }
     } catch (err) {
       console.error('Report scheduler error:', err.message);
