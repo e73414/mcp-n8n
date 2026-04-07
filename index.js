@@ -2122,6 +2122,9 @@ async function executeScheduledReport(schedule, client) {
     const { prompt: originalPrompt, report_plan } = convResult.rows[0];
     if (!report_plan) throw new Error('No saved report_plan — cannot run scheduled report');
 
+    // Strip any [Scheduled:...] prefix from the original prompt once, for reuse throughout
+    const scheduledPrompt = originalPrompt.replace(/^\[.*?\]\s*/, '');
+
     // Parse plan
     let plan;
     try { plan = typeof report_plan === 'string' ? JSON.parse(report_plan) : report_plan; }
@@ -2131,9 +2134,8 @@ async function executeScheduledReport(schedule, client) {
     // If replan_on_run, call the planner fresh so time-based filters (e.g. "current month") use today's date
     if (schedule.replan_on_run) {
       console.log(`[Schedule ${schedule.id}] replan_on_run=true — re-planning with current date context...`);
-      const cleanPrompt = originalPrompt.replace(/^\[.*?\]\s*/, '');
       const planResponse = await mcpExecute('webhook/plan-report', {
-        prompt: cleanPrompt,
+        prompt: scheduledPrompt,
         email: schedule.user_email,
         dataset_ids: schedule.dataset_ids.split(',').map(s => s.trim()),
         model: schedule.plan_model,
@@ -2201,6 +2203,7 @@ async function executeScheduledReport(schedule, client) {
         report_id: reportId,
         email: schedule.user_email,
         model: schedule.execute_model,
+        user_prompt: scheduledPrompt,
         ...(schedule.template_id && { templateId: schedule.template_id }),
         ...(schedule.detail_level && { detail_level: schedule.detail_level }),
         ...(schedule.report_detail && { report_detail: schedule.report_detail }),
@@ -2234,8 +2237,6 @@ async function executeScheduledReport(schedule, client) {
     if (!htmlContent) throw new Error('Formatter timed out — final_report never appeared');
 
     // 4. Save to conversation_history
-    const promptMatch = originalPrompt.match(/^\[.*?\]\s*(.*)$/s);
-    const cleanPrompt = promptMatch ? promptMatch[1] : originalPrompt;
     console.log(`[Schedule ${schedule.id}] Saving to history...`);
     await client.query(`
       INSERT INTO n8n_data.conversation_history
@@ -2243,7 +2244,7 @@ async function executeScheduledReport(schedule, client) {
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
     `, [
       schedule.user_email,
-      `[Scheduled:${schedule.id}] ${cleanPrompt.substring(0, 200)}`,
+      `[Scheduled:${schedule.id}] ${scheduledPrompt.substring(0, 200)}`,
       htmlContent,
       schedule.execute_model,
       schedule.dataset_ids,
