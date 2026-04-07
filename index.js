@@ -2001,6 +2001,54 @@ async function mcpExecute(webhookPath, input) {
   return resp.data;
 }
 
+// Recursively search for a ReportPlan object (has a steps array) — mirrors frontend logic
+function findPlanInResponse(val, depth = 0) {
+  if (depth > 6 || !val) return undefined;
+  if (typeof val === 'string') {
+    try { return findPlanInResponse(JSON.parse(val), depth + 1); } catch { return undefined; }
+  }
+  if (Array.isArray(val)) {
+    for (const item of val) {
+      const found = findPlanInResponse(item, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (typeof val !== 'object') return undefined;
+  if (Array.isArray(val.steps) && val.steps.length > 0) return val;
+  for (const key of ['output', 'data', 'result', 'plan']) {
+    if (val[key] != null) {
+      const found = findPlanInResponse(val[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+// Recursively search for report_id in nested response — mirrors frontend logic
+function findReportIdInResponse(val, depth = 0) {
+  if (depth > 6 || !val) return undefined;
+  if (typeof val === 'string') {
+    try { return findReportIdInResponse(JSON.parse(val), depth + 1); } catch { return undefined; }
+  }
+  if (Array.isArray(val)) {
+    for (const item of val) {
+      const found = findReportIdInResponse(item, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (typeof val !== 'object') return undefined;
+  if (val.report_id && typeof val.report_id === 'string') return val.report_id;
+  for (const key of ['output', 'data', 'result']) {
+    if (val[key] != null) {
+      const found = findReportIdInResponse(val[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 async function executeScheduledReport(schedule, client) {
   try {
     // 1. Fetch the original conversation/prompt
@@ -2026,11 +2074,11 @@ async function executeScheduledReport(schedule, client) {
       model: schedule.plan_model,
     });
 
-    if (planData.status === 'error' || !planData.plan) {
-      throw new Error(`Plan generation failed: ${planData.error || planData.message || JSON.stringify(planData)}`);
+    const plan = findPlanInResponse(planData);
+    if (!plan) {
+      throw new Error(`Plan generation failed — could not find plan in response: ${JSON.stringify(planData).substring(0, 300)}`);
     }
-
-    const plan = planData.plan;
+    console.log(`[Report ${schedule.id}] Plan found with ${plan.steps?.length} steps`);
 
     // 3. Execute plan via /mcp/execute
     console.log(`[Report ${schedule.id}] Starting plan execution...`);
@@ -2041,15 +2089,9 @@ async function executeScheduledReport(schedule, client) {
       ...(schedule.template_id && { templateId: schedule.template_id }),
     });
 
-    // Extract report_id from response (same nested structure as frontend)
-    let reportId = execData.report_id;
-    if (!reportId && execData.data) {
-      const raw = typeof execData.data === 'string' ? JSON.parse(execData.data) : execData.data;
-      reportId = (Array.isArray(raw) ? raw[0] : raw)?.report_id;
-    }
-
+    const reportId = findReportIdInResponse(execData);
     if (!reportId) {
-      throw new Error(`Execute plan failed: no report_id returned. Response: ${JSON.stringify(execData)}`);
+      throw new Error(`Execute plan failed — no report_id returned. Response: ${JSON.stringify(execData).substring(0, 300)}`);
     }
 
     // 4. Poll checkReportProgress via /mcp/execute (max 60 iterations, 5-sec intervals = 5 minutes max)
