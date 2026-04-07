@@ -2083,152 +2083,118 @@ function findProgressStatus(val) {
 
 async function executeScheduledReport(schedule, client) {
   try {
-    // 1. Fetch the original conversation/prompt
+    // 1. Load original conversation — use the saved report_plan to skip re-planning
     const convResult = await client.query(
       `SELECT prompt, report_plan FROM n8n_data.conversation_history WHERE id = $1`,
       [schedule.conversation_id]
     );
+    if (convResult.rows.length === 0) throw new Error(`Conversation ${schedule.conversation_id} not found`);
 
-    if (convResult.rows.length === 0) {
-      throw new Error(`Conversation ${schedule.conversation_id} not found`);
-    }
+    const { prompt: originalPrompt, report_plan } = convResult.rows[0];
+    if (!report_plan) throw new Error('No saved report_plan on this conversation — cannot run scheduled report');
 
-    const originalConv = convResult.rows[0];
-    const promptMatch = originalConv.prompt.match(/^\[.*?\]\s*(.*)$/s);
-    const originalPrompt = promptMatch ? promptMatch[1] : originalConv.prompt;
-
-    // 2. Plan report via /mcp/execute
-    console.log(`[Report ${schedule.id}] Starting plan generation...`);
-    const planData = await mcpExecute('webhook/plan-report', {
-      prompt: originalPrompt,
-      email: schedule.user_email,
-      dataset_ids: schedule.dataset_ids.split(',').map(id => id.trim()).filter(id => id !== 'all'),
-      model: schedule.plan_model,
-    });
-
-    const plan = findPlanInResponse(planData);
-    if (!plan) {
-      throw new Error(`Plan generation failed — could not find plan in response: ${JSON.stringify(planData).substring(0, 300)}`);
-    }
-    console.log(`[Report ${schedule.id}] Plan found with ${plan.steps?.length} steps`);
-
-    // 3. Execute plan via /mcp/execute
-    console.log(`[Report ${schedule.id}] Starting plan execution...`);
+    // 2. Execute the saved plan directly (no re-planning)
+    console.log(`[Schedule ${schedule.id}] Executing saved plan...`);
     const execData = await mcpExecute('webhook/execute-plan', {
-      plan: JSON.stringify(plan),
+      plan: typeof report_plan === 'string' ? report_plan : JSON.stringify(report_plan),
       email: schedule.user_email,
       model: schedule.execute_model,
       ...(schedule.template_id && { templateId: schedule.template_id }),
     });
 
     const reportId = findReportIdInResponse(execData);
-    if (!reportId) {
-      throw new Error(`Execute plan failed — no report_id returned. Response: ${JSON.stringify(execData).substring(0, 300)}`);
-    }
+    if (!reportId) throw new Error(`Execute plan returned no report_id. Response: ${JSON.stringify(execData).substring(0, 300)}`);
+    console.log(`[Schedule ${schedule.id}] Report ID: ${reportId}`);
 
-    // 4. Poll checkReportProgress via /mcp/execute (max 60 iterations, 5-sec intervals = 5 minutes max)
-    console.log(`[Report ${schedule.id}] Polling progress for report ${reportId}...`);
-    let attempts = 0;
-    const maxAttempts = 60;
+    // 3. Single poll loop — mirrors the frontend flow exactly:
+    //    poll until steps complete → trigger formatter once → poll until final_report appears
+    let formatterCalled = false;
+    let htmlContent = '';
+    const maxAttempts = 120; // 10 minutes (120 × 5s)
 
-    let progressStatus = 'in_progress';
-    while (attempts < maxAttempts) {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
       await new Promise(r => setTimeout(r, 5000));
+
+      let progressResult;
       try {
         const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
-        // Recursively search the nested n8n response for the progress object
-        progressStatus = findProgressStatus(progressData) || 'in_progress';
-        console.log(`[Report ${schedule.id}] Progress status: ${progressStatus}`);
+        progressResult = findProgressResult(progressData);
       } catch (err) {
-        console.log(`[Report ${schedule.id}] Poll attempt ${attempts + 1} error: ${err.message}`);
+        console.log(`[Schedule ${schedule.id}] Poll ${attempt + 1} error: ${err.message}`);
+        continue;
       }
-      if (progressStatus === 'completed' || progressStatus === 'error') {
+
+      if (!progressResult) {
+        console.log(`[Schedule ${schedule.id}] Poll ${attempt + 1}: no progress object yet`);
+        continue;
+      }
+
+      const { status, final_report } = progressResult;
+      console.log(`[Schedule ${schedule.id}] Poll ${attempt + 1}: status=${status} final_report=${final_report ? 'yes' : 'no'}`);
+
+      // Done — extract HTML from final_report
+      if (final_report) {
+        const raw = final_report.trim();
+        try { htmlContent = raw.startsWith('{') ? (JSON.parse(raw).content || raw) : raw; }
+        catch { htmlContent = raw; }
+        console.log(`[Schedule ${schedule.id}] Final report received (${htmlContent.length} chars)`);
         break;
       }
-      attempts++;
-    }
 
-    if (progressStatus === 'error') {
-      throw new Error('Report execution failed (progress status = error)');
-    }
-    if (attempts >= maxAttempts) {
-      throw new Error('Report execution timeout after 5 minutes');
-    }
+      if (status === 'error') throw new Error('Report execution failed (progress status = error)');
 
-    // 5. Run formatter via /mcp/execute — triggers async formatter, result appears in final_report
-    console.log(`[Report ${schedule.id}] Running formatter...`);
-    await mcpExecute('webhook/run-formatter', {
-      report_id: reportId,
-      email: schedule.user_email,
-      model: schedule.execute_model,
-      ...(schedule.template_id && { templateId: schedule.template_id }),
-      ...(schedule.detail_level && { detail_level: schedule.detail_level }),
-      ...(schedule.report_detail && { report_detail: schedule.report_detail }),
-      produce_report: 'Yes',
-    });
-
-    // 6. Poll check-report-progress again until final_report is populated (formatter is async)
-    console.log(`[Report ${schedule.id}] Polling for formatted report...`);
-    let htmlContent = '';
-    let fmtAttempts = 0;
-    const maxFmtAttempts = 60; // 5 minutes max
-    while (fmtAttempts < maxFmtAttempts) {
-      await new Promise(r => setTimeout(r, 5000));
-      try {
-        const fmtProgress = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
-        const fmtResult = findProgressResult(fmtProgress);
-        console.log(`[Report ${schedule.id}] Formatter poll ${fmtAttempts + 1}: final_report=${fmtResult?.final_report ? 'present' : 'null'}`);
-        if (fmtResult?.final_report) {
-          // Formatter outputs { subject, content } JSON or raw HTML
-          const raw = fmtResult.final_report.trim();
-          if (raw.startsWith('{')) {
-            try {
-              const parsed = JSON.parse(raw);
-              htmlContent = parsed.content || raw;
-            } catch { htmlContent = raw; }
-          } else {
-            htmlContent = raw;
-          }
-          break;
+      // Steps complete but formatter not yet triggered — call it once and keep polling
+      if (status === 'completed' && !formatterCalled) {
+        formatterCalled = true;
+        console.log(`[Schedule ${schedule.id}] Steps complete — triggering formatter...`);
+        try {
+          await mcpExecute('webhook/run-formatter', {
+            report_id: reportId,
+            email: schedule.user_email,
+            model: schedule.execute_model,
+            ...(schedule.template_id && { templateId: schedule.template_id }),
+            ...(schedule.detail_level && { detail_level: schedule.detail_level }),
+            ...(schedule.report_detail && { report_detail: schedule.report_detail }),
+            produce_report: 'Yes',
+          });
+          console.log(`[Schedule ${schedule.id}] Formatter triggered — waiting for final_report...`);
+        } catch (err) {
+          // Log but keep polling — formatter may still complete
+          console.log(`[Schedule ${schedule.id}] Formatter trigger error: ${err.message}`);
         }
-      } catch (err) {
-        console.log(`[Report ${schedule.id}] Formatter poll ${fmtAttempts + 1} error: ${err.message}`);
       }
-      fmtAttempts++;
     }
 
-    if (!htmlContent) {
-      throw new Error('Formatter timed out — final_report was never populated');
-    }
+    if (!htmlContent) throw new Error('Timed out (10 min) waiting for formatted report');
 
-    // 7. Save to conversation_history as a new record
-    console.log(`[Report ${schedule.id}] Saving report to history...`);
+    // 4. Save to conversation_history
+    const promptMatch = originalPrompt.match(/^\[.*?\]\s*(.*)$/s);
+    const cleanPrompt = promptMatch ? promptMatch[1] : originalPrompt;
+    console.log(`[Schedule ${schedule.id}] Saving to history...`);
     await client.query(`
       INSERT INTO n8n_data.conversation_history
       (user_email, prompt, response, ai_model, dataset_id, dataset_name, report_plan, report_id, detail_level, report_detail, created_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
     `, [
       schedule.user_email,
-      `[Execute Plan] Scheduled run: ${originalPrompt.substring(0, 100)}...`,
+      `[Scheduled] ${cleanPrompt.substring(0, 200)}`,
       htmlContent,
       schedule.execute_model,
       schedule.dataset_ids,
       schedule.dataset_name,
-      originalConv.report_plan || null,
+      typeof report_plan === 'string' ? report_plan : JSON.stringify(report_plan),
       reportId,
       schedule.detail_level || null,
-      schedule.report_detail || null
+      schedule.report_detail || null,
     ]);
 
-    // 8. Update schedule: success
-    console.log(`[Report ${schedule.id}] Marking schedule as successful`);
+    // 5. Mark success
     await client.query(`
       UPDATE n8n_data.report_schedules
-      SET last_run_at = now(), last_run_status = $1, last_run_attempt = 0, updated_at = now()
-      WHERE id = $2
-    `, ['success', schedule.id]);
-
-    console.log(`[Report ${schedule.id}] Schedule execution completed successfully`);
+      SET last_run_at = now(), last_run_status = 'success', last_run_attempt = 0, updated_at = now()
+      WHERE id = $1
+    `, [schedule.id]);
+    console.log(`[Schedule ${schedule.id}] Completed successfully`);
 
   } catch (err) {
     console.error(`[Report ${schedule.id}] Execution failed: ${err.message}`);
