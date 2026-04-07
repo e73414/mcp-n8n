@@ -1973,10 +1973,17 @@ function startReportScheduler() {
           ['running', schedule.id]
         );
 
-        // Execute asynchronously without blocking the loop
-        executeScheduledReport(schedule, client).catch(err => {
-          console.error(`Scheduled report ${schedule.id} execution failed:`, err.message);
-        });
+        // Execute asynchronously with its own dedicated client (loop client is released immediately after)
+        ;(async () => {
+          const execClient = await pgPool.connect();
+          try {
+            await executeScheduledReport(schedule, execClient);
+          } catch (err) {
+            console.error(`Scheduled report ${schedule.id} execution failed:`, err.message);
+          } finally {
+            execClient.release();
+          }
+        })();
       }
     } catch (err) {
       console.error('Report scheduler error:', err.message);
