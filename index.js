@@ -849,10 +849,17 @@ app.post('/report-schedules/:id/run-now', async (req, res) => {
 
     res.json({ status: 'started' });
 
-    // Execute asynchronously after responding
-    executeScheduledReport(schedule, client).catch(err => {
-      console.error(`Run-now report ${id} failed:`, err.message);
-    });
+    // Execute in background with its own dedicated client
+    (async () => {
+      const execClient = await pgPool.connect();
+      try {
+        await executeScheduledReport(schedule, execClient);
+      } catch (err) {
+        console.error(`Run-now report ${id} failed:`, err.message);
+      } finally {
+        execClient.release();
+      }
+    })();
   } catch (err) {
     console.error('POST /report-schedules/:id/run-now error:', err.message);
     res.status(500).json({ error: err.message });
