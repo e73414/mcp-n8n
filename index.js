@@ -2103,7 +2103,11 @@ async function executeScheduledReport(schedule, client) {
       await new Promise(r => setTimeout(r, 5000));
       try {
         const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
-        const status = progressData.status || (Array.isArray(progressData.data) ? progressData.data[0]?.status : progressData.data?.status);
+        // Extract status from nested response — mirrors frontend extractProgress logic
+        let raw = progressData?.data;
+        if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { /* ignore */ } }
+        const progressObj = Array.isArray(raw) ? raw[0] : (raw || progressData);
+        const status = progressObj?.status;
         console.log(`[Report ${schedule.id}] Progress status: ${status}`);
         if (status === 'completed') {
           console.log(`[Report ${schedule.id}] Report completed`);
@@ -2121,16 +2125,16 @@ async function executeScheduledReport(schedule, client) {
       throw new Error('Report execution timeout after 5 minutes');
     }
 
-    // 5. Run formatter via /mcp/execute
+    // 5. Run formatter via /mcp/execute — use snake_case field names as n8n expects
     console.log(`[Report ${schedule.id}] Running formatter...`);
     await mcpExecute('webhook/run-formatter', {
-      reportId,
+      report_id: reportId,
       email: schedule.user_email,
       model: schedule.execute_model,
       ...(schedule.template_id && { templateId: schedule.template_id }),
-      ...(schedule.detail_level && { detailLevel: schedule.detail_level }),
-      ...(schedule.report_detail && { reportDetail: schedule.report_detail }),
-      produceReport: 'Yes',
+      ...(schedule.detail_level && { detail_level: schedule.detail_level }),
+      ...(schedule.report_detail && { report_detail: schedule.report_detail }),
+      produce_report: 'Yes',
     });
 
     // 6. Fetch the formatted report HTML from local /reports/:id/steps endpoint
