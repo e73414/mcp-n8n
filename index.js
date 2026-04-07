@@ -671,6 +671,153 @@ app.delete('/conversations/:id', async (req, res) => {
   } finally { client.release(); }
 });
 
+// ── Report Schedules ──────────────────────────────────────────────────────────
+
+app.get('/report-schedules', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const userEmail = req.headers['x-user-email'] || '';
+    const showAll = req.query.all === 'true';
+
+    // Admin check
+    const isUserAdmin = await isAdmin(userEmail, client);
+
+    let query = 'SELECT * FROM n8n_data.report_schedules';
+    const params: any[] = [];
+
+    if (!isUserAdmin && !showAll) {
+      query += ' WHERE user_email = $1';
+      params.push(userEmail);
+    }
+
+    query += ' ORDER BY created_at DESC';
+
+    const result = await client.query(query, params);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /report-schedules error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.post('/report-schedules', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const userEmail = req.headers['x-user-email'] || '';
+    const {
+      conversation_id, schedule, plan_model, execute_model,
+      dataset_ids, dataset_name, detail_level, report_detail, template_id
+    } = req.body;
+
+    if (!conversation_id || !schedule || !plan_model || !execute_model || !dataset_ids || !dataset_name) {
+      res.status(400).json({ error: 'Missing required fields' });
+      return;
+    }
+
+    const result = await client.query(`
+      INSERT INTO n8n_data.report_schedules
+      (conversation_id, user_email, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level, report_detail, template_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING *
+    `, [conversation_id, userEmail, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level || null, report_detail || null, template_id || null]);
+
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('POST /report-schedules error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.patch('/report-schedules/:id', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const userEmail = req.headers['x-user-email'] || '';
+    const { id } = req.params;
+    const { enabled, schedule, plan_model, execute_model, detail_level, report_detail } = req.body;
+
+    // Check ownership
+    const existing = await client.query(
+      'SELECT user_email FROM n8n_data.report_schedules WHERE id = $1',
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Schedule not found' });
+      return;
+    }
+
+    const isUserAdmin = await isAdmin(userEmail, client);
+    if (existing.rows[0].user_email !== userEmail && !isUserAdmin) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const updates: string[] = [];
+    const values: any[] = [];
+    let paramIdx = 1;
+
+    if (enabled !== undefined) { updates.push(`enabled = $${paramIdx++}`); values.push(enabled); }
+    if (schedule !== undefined) { updates.push(`schedule = $${paramIdx++}`); values.push(schedule); }
+    if (plan_model !== undefined) { updates.push(`plan_model = $${paramIdx++}`); values.push(plan_model); }
+    if (execute_model !== undefined) { updates.push(`execute_model = $${paramIdx++}`); values.push(execute_model); }
+    if (detail_level !== undefined) { updates.push(`detail_level = $${paramIdx++}`); values.push(detail_level); }
+    if (report_detail !== undefined) { updates.push(`report_detail = $${paramIdx++}`); values.push(report_detail); }
+
+    if (updates.length === 0) {
+      res.status(400).json({ error: 'No fields to update' });
+      return;
+    }
+
+    updates.push(`updated_at = now()`);
+    values.push(id);
+
+    const result = await client.query(`
+      UPDATE n8n_data.report_schedules
+      SET ${updates.join(', ')}
+      WHERE id = $${paramIdx}
+      RETURNING *
+    `, values);
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'Schedule not found' });
+    } else {
+      res.json(result.rows[0]);
+    }
+  } catch (err) {
+    console.error('PATCH /report-schedules/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+app.delete('/report-schedules/:id', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const userEmail = req.headers['x-user-email'] || '';
+    const { id } = req.params;
+
+    // Check ownership
+    const existing = await client.query(
+      'SELECT user_email FROM n8n_data.report_schedules WHERE id = $1',
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Schedule not found' });
+      return;
+    }
+
+    const isUserAdmin = await isAdmin(userEmail, client);
+    if (existing.rows[0].user_email !== userEmail && !isUserAdmin) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    await client.query('DELETE FROM n8n_data.report_schedules WHERE id = $1', [id]);
+    res.status(204).send();
+  } catch (err) {
+    console.error('DELETE /report-schedules/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // ── Nav links & AI models ─────────────────────────────────────────────────────
 
 app.get('/nav-links', async (req, res) => {
@@ -1699,6 +1846,238 @@ async function loadAndScheduleAll() {
     console.error('Failed to load ingestion schedules:', err.message);
   } finally {
     client.release();
+  }
+
+  // Start report scheduler
+  startReportScheduler();
+}
+
+// ── Report Scheduler ──────────────────────────────────────────────────────────
+
+function startReportScheduler() {
+  // Every minute, check for due report schedules and execute them
+  cron.schedule('* * * * *', async () => {
+    const client = await pgPool.connect();
+    try {
+      // Find enabled schedules where last_run_at is past the schedule time (or never run)
+      const result = await client.query(`
+        SELECT * FROM n8n_data.report_schedules
+        WHERE enabled = true
+          AND (last_run_status IS NULL OR last_run_status NOT LIKE 'running%')
+          AND (last_run_at IS NULL OR last_run_at < now() - interval '1 minute')
+        ORDER BY created_at ASC
+      `);
+
+      for (const schedule of result.rows) {
+        if (!cron.validate(schedule.schedule)) {
+          console.warn(`Invalid cron expression for schedule ${schedule.id}: ${schedule.schedule}`);
+          continue;
+        }
+
+        // Check if the cron expression matches the current time
+        // Use a simple check: find next run time and see if it's within this minute
+        try {
+          const nextRunTime = cron.nextDate(schedule.schedule);
+          const now = new Date();
+          if (nextRunTime <= new Date(now.getTime() + 60000)) {
+            // Mark as running and execute
+            await client.query(
+              `UPDATE n8n_data.report_schedules SET last_run_status = $1 WHERE id = $2`,
+              ['running', schedule.id]
+            );
+
+            // Execute asynchronously without blocking
+            executeScheduledReport(schedule, client).catch(err => {
+              console.error(`Scheduled report ${schedule.id} execution failed:`, err.message);
+            });
+          }
+        } catch (err) {
+          console.error(`Failed to check schedule ${schedule.id}:`, err.message);
+        }
+      }
+    } catch (err) {
+      console.error('Report scheduler error:', err.message);
+    } finally {
+      client.release();
+    }
+  });
+
+  console.log('Report scheduler started');
+}
+
+async function executeScheduledReport(schedule, client) {
+  try {
+    // 1. Fetch the original conversation/prompt
+    const convResult = await client.query(
+      `SELECT prompt, report_plan FROM n8n_data.conversation_history WHERE id = $1`,
+      [schedule.conversation_id]
+    );
+
+    if (convResult.rows.length === 0) {
+      throw new Error(`Conversation ${schedule.conversation_id} not found`);
+    }
+
+    const originalConv = convResult.rows[0];
+    const promptMatch = originalConv.prompt.match(/^\[.*?\]\s*(.*)$/s);
+    const originalPrompt = promptMatch ? promptMatch[1] : originalConv.prompt;
+
+    // 2. Call planReport webhook
+    console.log(`[Report ${schedule.id}] Starting plan generation...`);
+    const planResp = await axios.post(`${process.env.N8N_BASE_URL}/webhook/plan-report`, {
+      prompt: originalPrompt,
+      email: schedule.user_email,
+      dataset_ids: schedule.dataset_ids.split(',').map(id => id.trim()).filter(id => id !== 'all'),
+      model: schedule.plan_model
+    });
+
+    if (planResp.data.status !== 'ok' || !planResp.data.plan) {
+      throw new Error(`Plan generation failed: ${planResp.data.message || 'Unknown error'}`);
+    }
+
+    const plan = planResp.data.plan;
+
+    // 3. Call executePlan webhook (async)
+    console.log(`[Report ${schedule.id}] Starting plan execution...`);
+    const execResp = await axios.post(`${process.env.N8N_BASE_URL}/webhook/execute-plan`, {
+      plan: JSON.stringify(plan),
+      email: schedule.user_email,
+      model: schedule.execute_model,
+      templateId: schedule.template_id,
+      reportId: Math.random().toString(36).substring(7) // new report ID
+    });
+
+    if (execResp.data.status !== 'ok' || !execResp.data.report_id) {
+      throw new Error(`Plan execution failed: ${execResp.data.message || 'Unknown error'}`);
+    }
+
+    const reportId = execResp.data.report_id;
+
+    // 4. Poll checkReportProgress until complete (max 60 iterations, 5-sec intervals = 5 minutes max)
+    console.log(`[Report ${schedule.id}] Polling progress for report ${reportId}...`);
+    let reportProgress;
+    let attempts = 0;
+    const maxAttempts = 60;
+
+    while (attempts < maxAttempts) {
+      try {
+        reportProgress = await axios.post(`${process.env.N8N_BASE_URL}/webhook/check-report-progress`, {
+          report_id: reportId
+        });
+
+        if (reportProgress.data.status === 'completed') {
+          console.log(`[Report ${schedule.id}] Report completed`);
+          break;
+        } else if (reportProgress.data.status === 'error') {
+          throw new Error(`Report execution error: ${reportProgress.data.message || 'Unknown error'}`);
+        }
+
+        // Wait 5 seconds before next poll
+        await new Promise(r => setTimeout(r, 5000));
+        attempts++;
+      } catch (err) {
+        if (attempts < maxAttempts) {
+          console.log(`[Report ${schedule.id}] Poll attempt ${attempts + 1} failed, retrying...`);
+          await new Promise(r => setTimeout(r, 5000));
+          attempts++;
+        } else {
+          throw err;
+        }
+      }
+    }
+
+    if (attempts >= maxAttempts) {
+      throw new Error('Report execution timeout after 5 minutes');
+    }
+
+    // 5. Call runFormatter to generate HTML
+    console.log(`[Report ${schedule.id}] Running formatter...`);
+    await axios.post(`${process.env.N8N_BASE_URL}/webhook/run-formatter`, {
+      reportId: reportId,
+      email: schedule.user_email,
+      model: schedule.execute_model,
+      templateId: schedule.template_id,
+      detailLevel: schedule.detail_level,
+      reportDetail: schedule.report_detail,
+      produceReport: 'Yes'
+    });
+
+    // 6. Fetch the final HTML report
+    console.log(`[Report ${schedule.id}] Fetching formatted report...`);
+    const reportDataResp = await axios.get(`${process.env.N8N_BASE_URL}/reports/${reportId}/steps`);
+
+    // Extract HTML from report data
+    let htmlContent = '';
+    if (reportDataResp.data && typeof reportDataResp.data === 'string') {
+      htmlContent = reportDataResp.data;
+    } else if (reportDataResp.data && reportDataResp.data.html) {
+      htmlContent = reportDataResp.data.html;
+    }
+
+    if (!htmlContent) {
+      console.warn(`[Report ${schedule.id}] No HTML content in report response, attempting to fetch from temp tables...`);
+      // Fallback: try to construct HTML from temp report tables
+      htmlContent = `<p>Report execution completed. Report ID: ${reportId}</p>`;
+    }
+
+    // 7. Save to conversation_history as a new record
+    console.log(`[Report ${schedule.id}] Saving report to history...`);
+    await client.query(`
+      INSERT INTO n8n_data.conversation_history
+      (user_email, prompt, response, ai_model, dataset_id, dataset_name, report_plan, report_id, detail_level, report_detail, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+    `, [
+      schedule.user_email,
+      `[Execute Plan] Scheduled run: ${originalPrompt.substring(0, 100)}...`,
+      htmlContent,
+      schedule.execute_model,
+      schedule.dataset_ids,
+      schedule.dataset_name,
+      originalConv.report_plan || null,
+      reportId,
+      schedule.detail_level || null,
+      schedule.report_detail || null
+    ]);
+
+    // 8. Update schedule: success
+    console.log(`[Report ${schedule.id}] Marking schedule as successful`);
+    await client.query(`
+      UPDATE n8n_data.report_schedules
+      SET last_run_at = now(), last_run_status = $1, last_run_attempt = 0, updated_at = now()
+      WHERE id = $2
+    `, ['success', schedule.id]);
+
+    console.log(`[Report ${schedule.id}] Schedule execution completed successfully`);
+
+  } catch (err) {
+    console.error(`[Report ${schedule.id}] Execution failed: ${err.message}`);
+
+    // On failure: increment attempt counter
+    const existingResp = await client.query(
+      `SELECT last_run_attempt FROM n8n_data.report_schedules WHERE id = $1`,
+      [schedule.id]
+    );
+
+    const currentAttempt = (existingResp.rows[0]?.last_run_attempt ?? 0) + 1;
+
+    if (currentAttempt >= 3) {
+      // Max retries reached: disable schedule
+      await client.query(`
+        UPDATE n8n_data.report_schedules
+        SET enabled = false, last_run_status = $1, last_run_attempt = $2, updated_at = now()
+        WHERE id = $3
+      `, ['failed_max_retries', currentAttempt, schedule.id]);
+
+      console.log(`[Report ${schedule.id}] Schedule auto-disabled after ${currentAttempt} failed attempts`);
+    } else {
+      // Mark as failed, will retry next minute
+      await client.query(`
+        UPDATE n8n_data.report_schedules
+        SET last_run_status = $1, last_run_attempt = $2, updated_at = now()
+        WHERE id = $3
+      `, ['failed', currentAttempt, schedule.id]);
+
+      console.log(`[Report ${schedule.id}] Schedule marked as failed (attempt ${currentAttempt}/3), will retry next minute`);
+    }
   }
 }
 

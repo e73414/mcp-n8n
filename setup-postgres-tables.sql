@@ -231,6 +231,32 @@ CREATE INDEX IF NOT EXISTS idx_email_ingestion_sender
 CREATE INDEX IF NOT EXISTS idx_email_ingestion_message_id
   ON n8n_data.email_ingestion_requests(message_id);
 
+-- ── Report Schedules ──────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS n8n_data.report_schedules (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id   TEXT NOT NULL,
+  user_email        TEXT NOT NULL,
+  schedule          TEXT NOT NULL,
+  enabled           BOOLEAN DEFAULT true,
+  plan_model        TEXT NOT NULL,
+  execute_model     TEXT NOT NULL,
+  dataset_ids       TEXT NOT NULL,
+  dataset_name      TEXT NOT NULL,
+  detail_level      TEXT,
+  report_detail     TEXT,
+  template_id       TEXT,
+  last_run_at       TIMESTAMPTZ,
+  last_run_status   TEXT,
+  last_run_attempt  INTEGER DEFAULT 0,
+  created_at        TIMESTAMPTZ DEFAULT now(),
+  updated_at        TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_report_schedules_user
+  ON n8n_data.report_schedules(user_email);
+CREATE INDEX IF NOT EXISTS idx_report_schedules_enabled
+  ON n8n_data.report_schedules(enabled) WHERE enabled = true;
+
 -- ── Admin navigation links ────────────────────────────────────────────────────
 -- Run once to add admin pages to the nav menu.
 -- Only admin users (profile = 'admadmadm') can access these routes.
