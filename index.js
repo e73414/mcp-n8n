@@ -2049,15 +2049,15 @@ function findReportIdInResponse(val, depth = 0) {
   return undefined;
 }
 
-// Recursively extract progress status from a deeply nested n8n response
-function findProgressStatus(val, depth = 0) {
+// Recursively find the progress object (has report_id + steps) in a nested n8n response
+function findProgressResult(val, depth = 0) {
   if (depth > 6 || !val) return undefined;
   if (typeof val === 'string') {
-    try { return findProgressStatus(JSON.parse(val), depth + 1); } catch { return undefined; }
+    try { return findProgressResult(JSON.parse(val), depth + 1); } catch { return undefined; }
   }
   if (Array.isArray(val)) {
     for (const item of val) {
-      const found = findProgressStatus(item, depth + 1);
+      const found = findProgressResult(item, depth + 1);
       if (found) return found;
     }
     return undefined;
@@ -2065,15 +2065,20 @@ function findProgressStatus(val, depth = 0) {
   if (typeof val !== 'object') return undefined;
   // A progress object has report_id + steps array
   if (val.report_id && Array.isArray(val.steps)) {
-    return val.status || 'in_progress';
+    return val;
   }
   for (const key of ['output', 'data', 'result', 'body']) {
     if (val[key] != null) {
-      const found = findProgressStatus(val[key], depth + 1);
+      const found = findProgressResult(val[key], depth + 1);
       if (found) return found;
     }
   }
   return undefined;
+}
+
+function findProgressStatus(val) {
+  const result = findProgressResult(val);
+  return result?.status;
 }
 
 async function executeScheduledReport(schedule, client) {
@@ -2150,7 +2155,7 @@ async function executeScheduledReport(schedule, client) {
       throw new Error('Report execution timeout after 5 minutes');
     }
 
-    // 5. Run formatter via /mcp/execute — use snake_case field names as n8n expects
+    // 5. Run formatter via /mcp/execute — triggers async formatter, result appears in final_report
     console.log(`[Report ${schedule.id}] Running formatter...`);
     await mcpExecute('webhook/run-formatter', {
       report_id: reportId,
@@ -2162,22 +2167,39 @@ async function executeScheduledReport(schedule, client) {
       produce_report: 'Yes',
     });
 
-    // 6. Fetch the formatted report HTML from local /reports/:id/steps endpoint
-    console.log(`[Report ${schedule.id}] Fetching formatted report...`);
-    const reportDataResp = await axios.get(
-      `http://localhost:${process.env.PORT || 3000}/reports/${reportId}/steps`,
-      { headers: { 'x-api-secret': process.env.API_SECRET || '' } }
-    );
-
-    // Extract HTML — formatter stores it in the formatted_report step or as html field
+    // 6. Poll check-report-progress again until final_report is populated (formatter is async)
+    console.log(`[Report ${schedule.id}] Polling for formatted report...`);
     let htmlContent = '';
-    const steps = reportDataResp.data?.steps || reportDataResp.data || [];
-    if (Array.isArray(steps)) {
-      const formatterStep = steps.find(s => s.step_type === 'formatter' || s.formatted_report);
-      htmlContent = formatterStep?.formatted_report || formatterStep?.result || '';
+    let fmtAttempts = 0;
+    const maxFmtAttempts = 60; // 5 minutes max
+    while (fmtAttempts < maxFmtAttempts) {
+      await new Promise(r => setTimeout(r, 5000));
+      try {
+        const fmtProgress = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
+        const fmtResult = findProgressResult(fmtProgress);
+        console.log(`[Report ${schedule.id}] Formatter poll ${fmtAttempts + 1}: final_report=${fmtResult?.final_report ? 'present' : 'null'}`);
+        if (fmtResult?.final_report) {
+          // Formatter outputs { subject, content } JSON or raw HTML
+          const raw = fmtResult.final_report.trim();
+          if (raw.startsWith('{')) {
+            try {
+              const parsed = JSON.parse(raw);
+              htmlContent = parsed.content || raw;
+            } catch { htmlContent = raw; }
+          } else {
+            htmlContent = raw;
+          }
+          break;
+        }
+      } catch (err) {
+        console.log(`[Report ${schedule.id}] Formatter poll ${fmtAttempts + 1} error: ${err.message}`);
+      }
+      fmtAttempts++;
     }
-    if (!htmlContent && reportDataResp.data?.html) htmlContent = reportDataResp.data.html;
-    if (!htmlContent) htmlContent = `<p>Scheduled report completed. Report ID: ${reportId}</p>`;
+
+    if (!htmlContent) {
+      throw new Error('Formatter timed out — final_report was never populated');
+    }
 
     // 7. Save to conversation_history as a new record
     console.log(`[Report ${schedule.id}] Saving report to history...`);
