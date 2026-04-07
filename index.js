@@ -818,6 +818,47 @@ app.delete('/report-schedules/:id', async (req, res) => {
   } finally { client.release(); }
 });
 
+app.post('/report-schedules/:id/run-now', async (req, res) => {
+  const client = await pgPool.connect();
+  try {
+    const userEmail = req.headers['x-user-email'] || '';
+    const { id } = req.params;
+
+    const existing = await client.query(
+      'SELECT * FROM n8n_data.report_schedules WHERE id = $1',
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      res.status(404).json({ error: 'Schedule not found' });
+      return;
+    }
+
+    const isUserAdmin = await isAdmin(userEmail, client);
+    if (existing.rows[0].user_email !== userEmail && !isUserAdmin) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+
+    const schedule = existing.rows[0];
+
+    // Mark as running
+    await client.query(
+      `UPDATE n8n_data.report_schedules SET last_run_status = $1, last_run_attempt = 0, updated_at = now() WHERE id = $2`,
+      ['running', id]
+    );
+
+    res.json({ status: 'started' });
+
+    // Execute asynchronously after responding
+    executeScheduledReport(schedule, client).catch(err => {
+      console.error(`Run-now report ${id} failed:`, err.message);
+    });
+  } catch (err) {
+    console.error('POST /report-schedules/:id/run-now error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // ── Nav links & AI models ─────────────────────────────────────────────────────
 
 app.get('/nav-links', async (req, res) => {
