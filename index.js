@@ -2049,6 +2049,33 @@ function findReportIdInResponse(val, depth = 0) {
   return undefined;
 }
 
+// Recursively extract progress status from a deeply nested n8n response
+function findProgressStatus(val, depth = 0) {
+  if (depth > 6 || !val) return undefined;
+  if (typeof val === 'string') {
+    try { return findProgressStatus(JSON.parse(val), depth + 1); } catch { return undefined; }
+  }
+  if (Array.isArray(val)) {
+    for (const item of val) {
+      const found = findProgressStatus(item, depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (typeof val !== 'object') return undefined;
+  // A progress object has report_id + steps array
+  if (val.report_id && Array.isArray(val.steps)) {
+    return val.status || 'in_progress';
+  }
+  for (const key of ['output', 'data', 'result', 'body']) {
+    if (val[key] != null) {
+      const found = findProgressStatus(val[key], depth + 1);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
 async function executeScheduledReport(schedule, client) {
   try {
     // 1. Fetch the original conversation/prompt
@@ -2099,28 +2126,26 @@ async function executeScheduledReport(schedule, client) {
     let attempts = 0;
     const maxAttempts = 60;
 
+    let progressStatus = 'in_progress';
     while (attempts < maxAttempts) {
       await new Promise(r => setTimeout(r, 5000));
       try {
         const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
-        // Extract status from nested response — mirrors frontend extractProgress logic
-        let raw = progressData?.data;
-        if (typeof raw === 'string') { try { raw = JSON.parse(raw); } catch { /* ignore */ } }
-        const progressObj = Array.isArray(raw) ? raw[0] : (raw || progressData);
-        const status = progressObj?.status;
-        console.log(`[Report ${schedule.id}] Progress status: ${status}`);
-        if (status === 'completed') {
-          console.log(`[Report ${schedule.id}] Report completed`);
-          break;
-        } else if (status === 'error') {
-          throw new Error(`Report execution error from progress check`);
-        }
+        // Recursively search the nested n8n response for the progress object
+        progressStatus = findProgressStatus(progressData) || 'in_progress';
+        console.log(`[Report ${schedule.id}] Progress status: ${progressStatus}`);
       } catch (err) {
         console.log(`[Report ${schedule.id}] Poll attempt ${attempts + 1} error: ${err.message}`);
+      }
+      if (progressStatus === 'completed' || progressStatus === 'error') {
+        break;
       }
       attempts++;
     }
 
+    if (progressStatus === 'error') {
+      throw new Error('Report execution failed (progress status = error)');
+    }
     if (attempts >= maxAttempts) {
       throw new Error('Report execution timeout after 5 minutes');
     }
