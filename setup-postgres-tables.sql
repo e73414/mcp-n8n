@@ -249,6 +249,7 @@ CREATE TABLE IF NOT EXISTS n8n_data.report_schedules (
   last_run_at       TIMESTAMPTZ,
   last_run_status   TEXT,
   last_run_attempt  INTEGER DEFAULT 0,
+  replan_on_run     BOOLEAN DEFAULT false,
   created_at        TIMESTAMPTZ DEFAULT now(),
   updated_at        TIMESTAMPTZ DEFAULT now()
 );
@@ -256,6 +257,9 @@ CREATE INDEX IF NOT EXISTS idx_report_schedules_user
   ON n8n_data.report_schedules(user_email);
 CREATE INDEX IF NOT EXISTS idx_report_schedules_enabled
   ON n8n_data.report_schedules(enabled) WHERE enabled = true;
+
+-- Migration: add replan_on_run for existing deployments
+ALTER TABLE n8n_data.report_schedules ADD COLUMN IF NOT EXISTS replan_on_run BOOLEAN DEFAULT false;
 
 -- ── Admin navigation links ────────────────────────────────────────────────────
 -- Run once to add admin pages to the nav menu.

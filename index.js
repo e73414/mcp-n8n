@@ -706,7 +706,7 @@ app.post('/report-schedules', async (req, res) => {
     const userEmail = req.headers['x-user-email'] || '';
     const {
       conversation_id, schedule, plan_model, execute_model,
-      dataset_ids, dataset_name, detail_level, report_detail, template_id
+      dataset_ids, dataset_name, detail_level, report_detail, template_id, replan_on_run
     } = req.body;
 
     if (!conversation_id || !schedule || !plan_model || !execute_model || !dataset_ids || !dataset_name) {
@@ -716,10 +716,10 @@ app.post('/report-schedules', async (req, res) => {
 
     const result = await client.query(`
       INSERT INTO n8n_data.report_schedules
-      (conversation_id, user_email, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level, report_detail, template_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      (conversation_id, user_email, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level, report_detail, template_id, replan_on_run)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
-    `, [conversation_id, userEmail, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level || null, report_detail || null, template_id || null]);
+    `, [conversation_id, userEmail, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level || null, report_detail || null, template_id || null, replan_on_run === true]);
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -733,7 +733,7 @@ app.patch('/report-schedules/:id', async (req, res) => {
   try {
     const userEmail = req.headers['x-user-email'] || '';
     const { id } = req.params;
-    const { enabled, schedule, plan_model, execute_model, detail_level, report_detail } = req.body;
+    const { enabled, schedule, plan_model, execute_model, detail_level, report_detail, replan_on_run } = req.body;
 
     // Check ownership
     const existing = await client.query(
@@ -761,6 +761,7 @@ app.patch('/report-schedules/:id', async (req, res) => {
     if (execute_model !== undefined) { updates.push(`execute_model = $${paramIdx++}`); values.push(execute_model); }
     if (detail_level !== undefined) { updates.push(`detail_level = $${paramIdx++}`); values.push(detail_level); }
     if (report_detail !== undefined) { updates.push(`report_detail = $${paramIdx++}`); values.push(report_detail); }
+    if (replan_on_run !== undefined) { updates.push(`replan_on_run = $${paramIdx++}`); values.push(replan_on_run === true); }
 
     if (updates.length === 0) {
       res.status(400).json({ error: 'No fields to update' });
@@ -2126,6 +2127,24 @@ async function executeScheduledReport(schedule, client) {
     try { plan = typeof report_plan === 'string' ? JSON.parse(report_plan) : report_plan; }
     catch (e) { throw new Error('Failed to parse report_plan: ' + e.message); }
     if (!Array.isArray(plan.steps) || plan.steps.length === 0) throw new Error('report_plan has no steps');
+
+    // If replan_on_run, call the planner fresh so time-based filters (e.g. "current month") use today's date
+    if (schedule.replan_on_run) {
+      console.log(`[Schedule ${schedule.id}] replan_on_run=true — re-planning with current date context...`);
+      const cleanPrompt = originalPrompt.replace(/^\[.*?\]\s*/, '');
+      const planResponse = await mcpExecute('webhook/plan-report', {
+        prompt: cleanPrompt,
+        email: schedule.user_email,
+        dataset_ids: schedule.dataset_ids.split(',').map(s => s.trim()),
+        model: schedule.plan_model,
+      });
+      const newPlan = findPlanInResponse(planResponse);
+      if (!newPlan || !Array.isArray(newPlan.steps) || newPlan.steps.length === 0) {
+        throw new Error('Re-planning failed — plan-report webhook returned no steps');
+      }
+      plan = newPlan;
+      console.log(`[Schedule ${schedule.id}] Re-planned successfully: ${plan.steps.length} steps`);
+    }
 
     // 2. Generate report_id the same way the frontend does
     const reportId = 'rpt_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
