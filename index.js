@@ -818,6 +818,27 @@ app.delete('/report-schedules/:id', async (req, res) => {
   } finally { client.release(); }
 });
 
+// GET /report-schedules/:id/runs — fetch conversation_history records saved by this schedule
+app.get('/report-schedules/:id/runs', async (req, res) => {
+  const { id } = req.params;
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `SELECT id, user_email, prompt, response, ai_model, dataset_id, dataset_name,
+              report_plan, report_id, detail_level, report_detail, created_at
+       FROM n8n_data.conversation_history
+       WHERE prompt LIKE $1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [`[Scheduled:${id}]%`]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /report-schedules/:id/runs error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.post('/report-schedules/:id/run-now', async (req, res) => {
   const client = await pgPool.connect();
   try {
@@ -2203,7 +2224,7 @@ async function executeScheduledReport(schedule, client) {
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
     `, [
       schedule.user_email,
-      `[Scheduled] ${cleanPrompt.substring(0, 200)}`,
+      `[Scheduled:${schedule.id}] ${cleanPrompt.substring(0, 200)}`,
       htmlContent,
       schedule.execute_model,
       schedule.dataset_ids,
