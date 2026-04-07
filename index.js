@@ -2083,7 +2083,7 @@ function findProgressStatus(val) {
 
 async function executeScheduledReport(schedule, client) {
   try {
-    // 1. Load original conversation — use the saved report_plan to skip re-planning
+    // 1. Load original conversation — reuse saved report_plan to skip re-planning
     const convResult = await client.query(
       `SELECT prompt, report_plan FROM n8n_data.conversation_history WHERE id = $1`,
       [schedule.conversation_id]
@@ -2091,81 +2091,100 @@ async function executeScheduledReport(schedule, client) {
     if (convResult.rows.length === 0) throw new Error(`Conversation ${schedule.conversation_id} not found`);
 
     const { prompt: originalPrompt, report_plan } = convResult.rows[0];
-    if (!report_plan) throw new Error('No saved report_plan on this conversation — cannot run scheduled report');
+    if (!report_plan) throw new Error('No saved report_plan — cannot run scheduled report');
 
-    // 2. Execute the saved plan directly (no re-planning)
-    console.log(`[Schedule ${schedule.id}] Executing saved plan...`);
-    const execData = await mcpExecute('webhook/execute-plan', {
-      plan: typeof report_plan === 'string' ? report_plan : JSON.stringify(report_plan),
-      email: schedule.user_email,
-      model: schedule.execute_model,
-      ...(schedule.template_id && { templateId: schedule.template_id }),
-    });
+    // Parse plan
+    let plan;
+    try { plan = typeof report_plan === 'string' ? JSON.parse(report_plan) : report_plan; }
+    catch (e) { throw new Error('Failed to parse report_plan: ' + e.message); }
+    if (!Array.isArray(plan.steps) || plan.steps.length === 0) throw new Error('report_plan has no steps');
 
-    const reportId = findReportIdInResponse(execData);
-    if (!reportId) throw new Error(`Execute plan returned no report_id. Response: ${JSON.stringify(execData).substring(0, 300)}`);
-    console.log(`[Schedule ${schedule.id}] Report ID: ${reportId}`);
+    // 2. Generate report_id the same way the frontend does
+    const reportId = 'rpt_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
+    console.log(`[Schedule ${schedule.id}] report_id=${reportId}, steps=${plan.steps.length}`);
 
-    // 3. Single poll loop — mirrors the frontend flow exactly:
-    //    poll until steps complete → trigger formatter once → poll until final_report appears
-    let formatterCalled = false;
-    let htmlContent = '';
-    const maxAttempts = 120; // 10 minutes (120 × 5s)
-
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await new Promise(r => setTimeout(r, 5000));
-
-      let progressResult;
+    // 3. Execute each step individually with steps_only=true — exactly as the frontend does
+    //    Steps run sequentially for simplicity (frontend runs them in dependency batches)
+    for (const step of plan.steps) {
+      console.log(`[Schedule ${schedule.id}] Executing step ${step.step_number}: ${step.purpose}`);
       try {
-        const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
-        progressResult = findProgressResult(progressData);
+        await mcpExecute('webhook/execute-plan', {
+          plan: JSON.stringify({ ...plan, steps: [step] }),
+          email: schedule.user_email,
+          model: schedule.execute_model,
+          ...(schedule.template_id && { templateId: schedule.template_id }),
+          report_id: reportId,
+          steps_only: true,
+        });
       } catch (err) {
-        console.log(`[Schedule ${schedule.id}] Poll ${attempt + 1} error: ${err.message}`);
-        continue;
-      }
-
-      if (!progressResult) {
-        console.log(`[Schedule ${schedule.id}] Poll ${attempt + 1}: no progress object yet`);
-        continue;
-      }
-
-      const { status, final_report } = progressResult;
-      console.log(`[Schedule ${schedule.id}] Poll ${attempt + 1}: status=${status} final_report=${final_report ? 'yes' : 'no'}`);
-
-      // Done — extract HTML from final_report
-      if (final_report) {
-        const raw = final_report.trim();
-        try { htmlContent = raw.startsWith('{') ? (JSON.parse(raw).content || raw) : raw; }
-        catch { htmlContent = raw; }
-        console.log(`[Schedule ${schedule.id}] Final report received (${htmlContent.length} chars)`);
-        break;
-      }
-
-      if (status === 'error') throw new Error('Report execution failed (progress status = error)');
-
-      // Steps complete but formatter not yet triggered — call it once and keep polling
-      if (status === 'completed' && !formatterCalled) {
-        formatterCalled = true;
-        console.log(`[Schedule ${schedule.id}] Steps complete — triggering formatter...`);
-        try {
-          await mcpExecute('webhook/run-formatter', {
-            report_id: reportId,
-            email: schedule.user_email,
-            model: schedule.execute_model,
-            ...(schedule.template_id && { templateId: schedule.template_id }),
-            ...(schedule.detail_level && { detail_level: schedule.detail_level }),
-            ...(schedule.report_detail && { report_detail: schedule.report_detail }),
-            produce_report: 'Yes',
-          });
-          console.log(`[Schedule ${schedule.id}] Formatter triggered — waiting for final_report...`);
-        } catch (err) {
-          // Log but keep polling — formatter may still complete
-          console.log(`[Schedule ${schedule.id}] Formatter trigger error: ${err.message}`);
-        }
+        console.log(`[Schedule ${schedule.id}] Step ${step.step_number} error: ${err.message}`);
+        // Don't abort — some steps may error but formatter can still run
       }
     }
 
-    if (!htmlContent) throw new Error('Timed out (10 min) waiting for formatted report');
+    // 4. Poll check-report-progress until all steps settle (completed or error)
+    console.log(`[Schedule ${schedule.id}] Waiting for steps to settle...`);
+    const stepNumbers = plan.steps.map(s => s.step_number);
+    let stepsSettled = false;
+    for (let attempt = 0; attempt < 60; attempt++) { // 5 min max
+      await new Promise(r => setTimeout(r, 5000));
+      try {
+        const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
+        const progressResult = findProgressResult(progressData);
+        if (progressResult && progressResult.steps && progressResult.steps.length > 0) {
+          const settled = stepNumbers.filter(num => {
+            const s = progressResult.steps.find(s => s.step_number === num);
+            return s && (s.status === 'completed' || s.status === 'error');
+          }).length;
+          console.log(`[Schedule ${schedule.id}] Steps poll ${attempt + 1}: ${settled}/${stepNumbers.length} settled`);
+          if (settled === stepNumbers.length) { stepsSettled = true; break; }
+        } else {
+          console.log(`[Schedule ${schedule.id}] Steps poll ${attempt + 1}: no steps data yet`);
+        }
+      } catch (err) {
+        console.log(`[Schedule ${schedule.id}] Steps poll ${attempt + 1} error: ${err.message}`);
+      }
+    }
+    if (!stepsSettled) throw new Error('Steps did not settle within 5 minutes');
+
+    // 5. Trigger formatter — exactly as the frontend does after all batches complete
+    console.log(`[Schedule ${schedule.id}] Triggering formatter...`);
+    try {
+      await mcpExecute('webhook/run-formatter', {
+        report_id: reportId,
+        email: schedule.user_email,
+        model: schedule.execute_model,
+        ...(schedule.template_id && { templateId: schedule.template_id }),
+        ...(schedule.detail_level && { detail_level: schedule.detail_level }),
+        ...(schedule.report_detail && { report_detail: schedule.report_detail }),
+        produce_report: 'Yes',
+      });
+      console.log(`[Schedule ${schedule.id}] Formatter triggered`);
+    } catch (err) {
+      console.log(`[Schedule ${schedule.id}] Formatter trigger error: ${err.message}`);
+      // Keep polling — formatter may still complete
+    }
+
+    // 6. Poll for final_report (formatter writes it back to check-report-progress)
+    let htmlContent = '';
+    for (let attempt = 0; attempt < 60; attempt++) { // 5 min max
+      await new Promise(r => setTimeout(r, 5000));
+      try {
+        const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
+        const progressResult = findProgressResult(progressData);
+        console.log(`[Schedule ${schedule.id}] Formatter poll ${attempt + 1}: final_report=${progressResult?.final_report ? 'yes' : 'no'}`);
+        if (progressResult?.final_report) {
+          const raw = progressResult.final_report.trim();
+          try { htmlContent = raw.startsWith('{') ? (JSON.parse(raw).content || raw) : raw; }
+          catch { htmlContent = raw; }
+          console.log(`[Schedule ${schedule.id}] Final report received (${htmlContent.length} chars)`);
+          break;
+        }
+      } catch (err) {
+        console.log(`[Schedule ${schedule.id}] Formatter poll ${attempt + 1} error: ${err.message}`);
+      }
+    }
+    if (!htmlContent) throw new Error('Formatter timed out — final_report never appeared');
 
     // 4. Save to conversation_history
     const promptMatch = originalPrompt.match(/^\[.*?\]\s*(.*)$/s);
