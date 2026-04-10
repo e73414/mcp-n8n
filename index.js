@@ -2281,7 +2281,7 @@ async function executeScheduledReport(schedule, client) {
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
     `, [
       schedule.user_email,
-      `[Scheduled:${schedule.id}] ${scheduledPrompt.substring(0, 200)}`,
+      `[Scheduled:${schedule.id}] ${scheduledPrompt}`,
       htmlContent,
       schedule.execute_model,
       schedule.dataset_ids,
