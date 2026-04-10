@@ -449,7 +449,12 @@ app.get('/step-export/:reportId/:stepNumber/csv', async (req, res) => {
     }
     const headers = Object.keys(data.rows[0]);
     const escapeCSV = v => {
-      const s = String(v ?? '');
+      if (v == null) return '';
+      // Format Date objects as ISO strings to avoid "(Pacific Daylight Time)" etc.
+      if (v instanceof Date) {
+        return v.toISOString();
+      }
+      const s = String(v);
       if (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r')) {
         return '"' + s.replace(/"/g, '""') + '"';
       }
@@ -499,7 +504,10 @@ app.get('/datasets/:datasetId/download-csv', async (req, res) => {
     const headers = dbColumns.map(col => dbToOriginal[col] || col);
 
     const escape = (val) => {
-      const str = (val === null || val === undefined) ? '' : String(val);
+      if (val === null || val === undefined) return '';
+      // Format Date objects as ISO strings to avoid "(Pacific Daylight Time)" etc.
+      if (val instanceof Date) return val.toISOString();
+      const str = String(val);
       return (str.includes(',') || str.includes('"') || str.includes('\n'))
         ? `"${str.replace(/"/g, '""')}"` : str;
     };
