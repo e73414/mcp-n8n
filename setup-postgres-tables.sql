@@ -238,6 +238,7 @@ CREATE TABLE IF NOT EXISTS n8n_data.report_schedules (
   conversation_id   TEXT NOT NULL,
   user_email        TEXT NOT NULL,
   schedule          TEXT NOT NULL,
+  timezone          TEXT DEFAULT 'America/Los_Angeles',
   enabled           BOOLEAN DEFAULT true,
   plan_model        TEXT NOT NULL,
   execute_model     TEXT NOT NULL,

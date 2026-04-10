@@ -705,7 +705,7 @@ app.post('/report-schedules', async (req, res) => {
   try {
     const userEmail = req.headers['x-user-email'] || '';
     const {
-      conversation_id, schedule, plan_model, execute_model,
+      conversation_id, schedule, timezone, plan_model, execute_model,
       dataset_ids, dataset_name, detail_level, report_detail, template_id, replan_on_run
     } = req.body;
 
@@ -716,10 +716,10 @@ app.post('/report-schedules', async (req, res) => {
 
     const result = await client.query(`
       INSERT INTO n8n_data.report_schedules
-      (conversation_id, user_email, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level, report_detail, template_id, replan_on_run)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      (conversation_id, user_email, schedule, timezone, plan_model, execute_model, dataset_ids, dataset_name, detail_level, report_detail, template_id, replan_on_run)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
-    `, [conversation_id, userEmail, schedule, plan_model, execute_model, dataset_ids, dataset_name, detail_level || null, report_detail || null, template_id || null, replan_on_run === true]);
+    `, [conversation_id, userEmail, schedule, timezone || 'America/Los_Angeles', plan_model, execute_model, dataset_ids, dataset_name, detail_level || null, report_detail || null, template_id || null, replan_on_run === true]);
 
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -733,7 +733,7 @@ app.patch('/report-schedules/:id', async (req, res) => {
   try {
     const userEmail = req.headers['x-user-email'] || '';
     const { id } = req.params;
-    const { enabled, schedule, plan_model, execute_model, detail_level, report_detail, replan_on_run } = req.body;
+    const { enabled, schedule, timezone, plan_model, execute_model, detail_level, report_detail, replan_on_run } = req.body;
 
     // Check ownership
     const existing = await client.query(
@@ -757,6 +757,7 @@ app.patch('/report-schedules/:id', async (req, res) => {
 
     if (enabled !== undefined) { updates.push(`enabled = $${paramIdx++}`); values.push(enabled); }
     if (schedule !== undefined) { updates.push(`schedule = $${paramIdx++}`); values.push(schedule); }
+    if (timezone !== undefined) { updates.push(`timezone = $${paramIdx++}`); values.push(timezone); }
     if (plan_model !== undefined) { updates.push(`plan_model = $${paramIdx++}`); values.push(plan_model); }
     if (execute_model !== undefined) { updates.push(`execute_model = $${paramIdx++}`); values.push(execute_model); }
     if (detail_level !== undefined) { updates.push(`detail_level = $${paramIdx++}`); values.push(detail_level); }
@@ -1924,18 +1925,46 @@ async function loadAndScheduleAll() {
 
 // ── Report Scheduler ──────────────────────────────────────────────────────────
 
-// Returns true if the given cron expression matches the current minute
-function cronMatchesNow(cronExpr) {
+// Returns true if the given cron expression matches the current minute in the specified timezone
+function cronMatchesNow(cronExpr, timezone = 'America/Los_Angeles') {
   const parts = cronExpr.trim().split(/\s+/);
   if (parts.length !== 5) return false;
   const [minutePart, hourPart, domPart, monthPart, dowPart] = parts;
 
+  // Get current time in the specified timezone
   const now = new Date();
-  const minute = now.getMinutes();
-  const hour = now.getHours();
-  const dom = now.getDate();
-  const month = now.getMonth() + 1; // 1-12
-  const dow = now.getDay(); // 0=Sun
+  let minute, hour, dom, month, dow;
+
+  try {
+    const formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: 'numeric',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: 'numeric',
+      weekday: 'short',
+      hour12: false
+    });
+    const parts = formatter.formatToParts(now);
+    const get = (type) => parts.find(p => p.type === type)?.value;
+
+    minute = parseInt(get('minute'));
+    hour = parseInt(get('hour'));
+    dom = parseInt(get('day'));
+    month = parseInt(get('month'));
+    // Convert weekday name to number (0=Sun)
+    const weekdayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    dow = weekdayMap[get('weekday')] ?? now.getDay();
+  } catch (err) {
+    // Fallback to server local time if timezone is invalid
+    console.warn(`Invalid timezone "${timezone}", falling back to server local time`);
+    minute = now.getMinutes();
+    hour = now.getHours();
+    dom = now.getDate();
+    month = now.getMonth() + 1;
+    dow = now.getDay();
+  }
 
   function matchesPart(part, value) {
     if (part === '*') return true;
@@ -1979,7 +2008,7 @@ function startReportScheduler() {
           continue;
         }
 
-        if (!cronMatchesNow(schedule.schedule)) continue;
+        if (!cronMatchesNow(schedule.schedule, schedule.timezone || 'America/Los_Angeles')) continue;
 
         // Prevent duplicate runs if last_run_at was within this minute
         if (schedule.last_run_at) {
