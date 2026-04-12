@@ -2020,7 +2020,12 @@ function startReportScheduler() {
           continue;
         }
 
-        if (!cronMatchesNow(schedule.schedule, schedule.timezone || 'America/Los_Angeles')) continue;
+        // Retry failed schedules immediately (up to max attempts) regardless of cron match.
+        // Otherwise only run when the cron expression matches the current minute.
+        const isRetry = schedule.last_run_status === 'failed' && (schedule.last_run_attempt || 0) < 3;
+        if (!isRetry) {
+          if (!cronMatchesNow(schedule.schedule, schedule.timezone || 'America/Los_Angeles')) continue;
+        }
 
         // Prevent duplicate runs if last_run_at was within this minute
         if (schedule.last_run_at) {
@@ -2379,6 +2384,7 @@ async function executeScheduledReport(schedule, client) {
     }
 
     // 3. Generate report_id the same way the frontend does
+    const executeStartTime = Date.now();
     const reportId = 'rpt_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
     console.log(`[Schedule ${schedule.id}] report_id=${reportId}, steps=${plan.steps.length}`);
 
@@ -2432,6 +2438,22 @@ async function executeScheduledReport(schedule, client) {
         }
       }
       if (!batchSettled) throw new Error(`Batch ${batchIdx + 1} did not settle within 5 minutes`);
+
+      // If any step in this batch errored, stop dispatching further batches —
+      // downstream steps depend on these results and will fail or produce wrong data.
+      // (Mirrors frontend waitForBatchCompletion which throws on step errors.)
+      const lastProgress = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
+      const lastResult = findProgressResult(lastProgress);
+      if (lastResult) {
+        const failedSteps = batchNums.filter(num => {
+          const s = lastResult.steps.find(s => s.step_number === num);
+          return s && s.status === 'error';
+        });
+        if (failedSteps.length > 0) {
+          console.log(`[Schedule ${schedule.id}] Steps [${failedSteps.join(', ')}] errored — skipping remaining batches`);
+          break;
+        }
+      }
     }
 
     // 5. Trigger formatter — exactly as the frontend does after all batches complete
@@ -2474,12 +2496,37 @@ async function executeScheduledReport(schedule, client) {
     }
     if (!htmlContent) throw new Error('Formatter timed out — final_report never appeared');
 
-    // 4. Save to conversation_history
+    // 7. Persist tmp tables so CSV downloads work from history
+    //    (mirrors frontend /reports/:reportId/persist call)
+    try {
+      const tmpTables = await client.query(
+        `SELECT step_number, raw_table_name FROM n8n_data.report_step_results
+         WHERE report_id = $1 AND raw_table_name IS NOT NULL AND raw_table_name LIKE 'tmp_rpt_%'`,
+        [reportId]
+      );
+      if (tmpTables.rowCount > 0) {
+        for (const row of tmpTables.rows) {
+          const newName = row.raw_table_name.replace(/^tmp_rpt_/, 'saved_rpt_');
+          await client.query(`ALTER TABLE n8n_data."${row.raw_table_name}" RENAME TO "${newName}"`);
+          await client.query(
+            `UPDATE n8n_data.report_step_results SET raw_table_name = $1
+             WHERE report_id = $2 AND step_number = $3`,
+            [newName, reportId, row.step_number]
+          );
+        }
+        console.log(`[Schedule ${schedule.id}] Persisted ${tmpTables.rowCount} tmp tables`);
+      }
+    } catch (err) {
+      console.log(`[Schedule ${schedule.id}] Warning: could not persist tmp tables: ${err.message}`);
+    }
+
+    // 8. Save to conversation_history
     console.log(`[Schedule ${schedule.id}] Saving to history...`);
+    const durationSeconds = Math.round((Date.now() - executeStartTime) / 1000);
     await client.query(`
       INSERT INTO n8n_data.conversation_history
-      (user_email, prompt, response, ai_model, dataset_id, dataset_name, report_plan, report_id, detail_level, report_detail, created_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+      (user_email, prompt, response, ai_model, dataset_id, dataset_name, report_plan, report_id, detail_level, report_detail, duration_seconds, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
     `, [
       schedule.user_email,
       `[Scheduled:${schedule.id}] ${scheduledPrompt}`,
@@ -2487,10 +2534,11 @@ async function executeScheduledReport(schedule, client) {
       schedule.execute_model,
       schedule.dataset_ids,
       schedule.dataset_name,
-      typeof report_plan === 'string' ? report_plan : JSON.stringify(report_plan),
+      JSON.stringify(plan),
       reportId,
       schedule.detail_level || null,
       schedule.report_detail || null,
+      durationSeconds,
     ]);
 
     // 5. Mark success
