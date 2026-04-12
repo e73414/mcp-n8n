@@ -690,15 +690,19 @@ app.get('/report-schedules', async (req, res) => {
     // Admin check
     const isUserAdmin = await isAdmin(userEmail, client);
 
-    let query = 'SELECT * FROM n8n_data.report_schedules';
+    let query = `
+      SELECT rs.*, ch.prompt AS conversation_prompt
+      FROM n8n_data.report_schedules rs
+      LEFT JOIN n8n_data.conversation_history ch ON ch.id = rs.conversation_id::uuid
+    `;
     const params = [];
 
     if (!isUserAdmin && !showAll) {
-      query += ' WHERE user_email = $1';
+      query += ' WHERE rs.user_email = $1';
       params.push(userEmail);
     }
 
-    query += ' ORDER BY created_at DESC';
+    query += ' ORDER BY rs.created_at DESC';
 
     const result = await client.query(query, params);
     res.json(result.rows);
