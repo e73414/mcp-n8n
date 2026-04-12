@@ -2454,6 +2454,121 @@ async function executeScheduledReport(schedule, client) {
           break;
         }
       }
+
+      // Validate that completed steps actually wrote data to their raw tables.
+      // n8n sometimes marks a step "completed" with an AI summary but fails to
+      // populate the tmp table — downstream steps then see empty dependency tables.
+      // Retry empty-table steps once before giving up.
+      const emptyTableSteps = [];
+      for (const stepNum of batchNums) {
+        try {
+          const tableCheck = await client.query(
+            `SELECT raw_table_name FROM n8n_data.report_step_results
+             WHERE report_id = $1 AND step_number = $2 AND raw_table_name IS NOT NULL AND status = 'completed'`,
+            [reportId, stepNum]
+          );
+          if (tableCheck.rowCount > 0) {
+            const tbl = tableCheck.rows[0].raw_table_name;
+            const countCheck = await client.query(
+              `SELECT count(*) as cnt FROM n8n_data."${tbl.replace(/"/g, '')}"`
+            );
+            if (parseInt(countCheck.rows[0].cnt) === 0) {
+              emptyTableSteps.push(stepNum);
+            }
+          }
+        } catch (err) {
+          console.log(`[Schedule ${schedule.id}] Step ${stepNum} table check error: ${err.message}`);
+        }
+      }
+
+      if (emptyTableSteps.length > 0) {
+        console.log(`[Schedule ${schedule.id}] Steps [${emptyTableSteps.join(', ')}] completed but raw table is empty — retrying once`);
+        const retryBatch = batch.filter(s => emptyTableSteps.includes(s.step_number));
+
+        // Drop the empty tables and step results so n8n can recreate them
+        for (const stepNum of emptyTableSteps) {
+          try {
+            const tblResult = await client.query(
+              `SELECT raw_table_name FROM n8n_data.report_step_results
+               WHERE report_id = $1 AND step_number = $2 AND raw_table_name IS NOT NULL`,
+              [reportId, stepNum]
+            );
+            if (tblResult.rowCount > 0) {
+              const tbl = tblResult.rows[0].raw_table_name.replace(/"/g, '');
+              await client.query(`DROP TABLE IF EXISTS n8n_data."${tbl}"`);
+            }
+            await client.query(
+              `DELETE FROM n8n_data.report_step_results WHERE report_id = $1 AND step_number = $2`,
+              [reportId, stepNum]
+            );
+          } catch (err) {
+            console.log(`[Schedule ${schedule.id}] Step ${stepNum} cleanup error: ${err.message}`);
+          }
+        }
+
+        // Re-dispatch the empty steps
+        await Promise.all(retryBatch.map(async step => {
+          try {
+            await mcpExecute('webhook/execute-plan', {
+              plan: JSON.stringify({ ...plan, steps: [step] }),
+              email: schedule.user_email,
+              model: schedule.execute_model,
+              ...(schedule.template_id && { templateId: schedule.template_id }),
+              report_id: reportId,
+              steps_only: true,
+            });
+          } catch (err) {
+            console.log(`[Schedule ${schedule.id}] Step ${step.step_number} retry dispatch error: ${err.message}`);
+          }
+        }));
+
+        // Wait for retried steps to settle
+        let retrySettled = false;
+        for (let attempt = 0; attempt < 60; attempt++) {
+          await new Promise(r => setTimeout(r, 5000));
+          try {
+            const retryProgress = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
+            const retryResult = findProgressResult(retryProgress);
+            if (retryResult && retryResult.steps) {
+              const settled = emptyTableSteps.filter(num => {
+                const s = retryResult.steps.find(s => s.step_number === num);
+                return s && (s.status === 'completed' || s.status === 'error');
+              }).length;
+              console.log(`[Schedule ${schedule.id}] Retry poll ${attempt + 1}: ${settled}/${emptyTableSteps.length} settled`);
+              if (settled === emptyTableSteps.length) { retrySettled = true; break; }
+            }
+          } catch (err) {
+            console.log(`[Schedule ${schedule.id}] Retry poll error: ${err.message}`);
+          }
+        }
+        if (!retrySettled) {
+          console.log(`[Schedule ${schedule.id}] Retry did not settle — continuing anyway`);
+        }
+
+        // Re-check: if still empty after retry, halt execution
+        let stillEmpty = false;
+        for (const stepNum of emptyTableSteps) {
+          try {
+            const recheck = await client.query(
+              `SELECT raw_table_name FROM n8n_data.report_step_results
+               WHERE report_id = $1 AND step_number = $2 AND raw_table_name IS NOT NULL AND status = 'completed'`,
+              [reportId, stepNum]
+            );
+            if (recheck.rowCount > 0) {
+              const tbl = recheck.rows[0].raw_table_name.replace(/"/g, '');
+              const cnt = await client.query(`SELECT count(*) as cnt FROM n8n_data."${tbl}"`);
+              if (parseInt(cnt.rows[0].cnt) === 0) {
+                console.log(`[Schedule ${schedule.id}] Step ${stepNum} still empty after retry`);
+                stillEmpty = true;
+              }
+            }
+          } catch (err) { /* ignore */ }
+        }
+        if (stillEmpty) {
+          console.log(`[Schedule ${schedule.id}] Steps still have empty tables after retry — skipping remaining batches`);
+          break;
+        }
+      }
     }
 
     // 5. Trigger formatter — exactly as the frontend does after all batches complete
