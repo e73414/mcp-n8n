@@ -2279,6 +2279,28 @@ Aggregation rules (when chunks have different values):
   return { ...plan, total_steps: newSteps.length, steps: newSteps }
 }
 
+// Topological sort — groups steps into parallel batches by dependency level.
+// Steps in the same batch have no inter-dependencies and can run concurrently.
+function groupStepsByBatch(steps) {
+  const batches = []
+  const completed = new Set()
+  let remaining = [...steps]
+  while (remaining.length > 0) {
+    const batch = remaining.filter(s =>
+      inferDepsFromSql(s).every(dep => completed.has(dep))
+    )
+    if (batch.length === 0) {
+      // Cycle or unresolvable deps — fall back to running remaining one at a time
+      batches.push(...remaining.map(s => [s]))
+      break
+    }
+    batches.push(batch)
+    batch.forEach(s => completed.add(s.step_number))
+    remaining = remaining.filter(s => !completed.has(s.step_number))
+  }
+  return batches
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function executeScheduledReport(schedule, client) {
@@ -2350,49 +2372,57 @@ async function executeScheduledReport(schedule, client) {
     const reportId = 'rpt_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
     console.log(`[Schedule ${schedule.id}] report_id=${reportId}, steps=${plan.steps.length}`);
 
-    // 4. Execute each step individually with steps_only=true — exactly as the frontend does
-    //    Steps run sequentially for simplicity (frontend runs them in dependency batches)
-    for (const step of plan.steps) {
-      console.log(`[Schedule ${schedule.id}] Executing step ${step.step_number}: ${step.purpose}`);
-      try {
-        await mcpExecute('webhook/execute-plan', {
-          plan: JSON.stringify({ ...plan, steps: [step] }),
-          email: schedule.user_email,
-          model: schedule.execute_model,
-          ...(schedule.template_id && { templateId: schedule.template_id }),
-          report_id: reportId,
-          steps_only: true,
-        });
-      } catch (err) {
-        console.log(`[Schedule ${schedule.id}] Step ${step.step_number} error: ${err.message}`);
-        // Don't abort — some steps may error but formatter can still run
-      }
-    }
+    // 4. Execute steps in dependency-ordered batches — dispatch each batch in parallel,
+    //    then wait for all steps in the batch to settle before dispatching the next.
+    //    This mirrors the frontend's groupStepsByBatch + waitForBatchCompletion pattern
+    //    and prevents dependent steps from running before their inputs are ready.
+    const batches = groupStepsByBatch(plan.steps);
+    console.log(`[Schedule ${schedule.id}] Executing ${plan.steps.length} steps in ${batches.length} batch(es)`);
 
-    // 5. Poll check-report-progress until all steps settle (completed or error)
-    console.log(`[Schedule ${schedule.id}] Waiting for steps to settle...`);
-    const stepNumbers = plan.steps.map(s => s.step_number);
-    let stepsSettled = false;
-    for (let attempt = 0; attempt < 60; attempt++) { // 5 min max
-      await new Promise(r => setTimeout(r, 5000));
-      try {
-        const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
-        const progressResult = findProgressResult(progressData);
-        if (progressResult && progressResult.steps && progressResult.steps.length > 0) {
-          const settled = stepNumbers.filter(num => {
-            const s = progressResult.steps.find(s => s.step_number === num);
-            return s && (s.status === 'completed' || s.status === 'error');
-          }).length;
-          console.log(`[Schedule ${schedule.id}] Steps poll ${attempt + 1}: ${settled}/${stepNumbers.length} settled`);
-          if (settled === stepNumbers.length) { stepsSettled = true; break; }
-        } else {
-          console.log(`[Schedule ${schedule.id}] Steps poll ${attempt + 1}: no steps data yet`);
+    for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+      const batch = batches[batchIdx];
+      const batchNums = batch.map(s => s.step_number);
+      console.log(`[Schedule ${schedule.id}] Batch ${batchIdx + 1}/${batches.length}: steps [${batchNums.join(', ')}]`);
+
+      // Dispatch all steps in this batch in parallel
+      await Promise.all(batch.map(async step => {
+        try {
+          await mcpExecute('webhook/execute-plan', {
+            plan: JSON.stringify({ ...plan, steps: [step] }),
+            email: schedule.user_email,
+            model: schedule.execute_model,
+            ...(schedule.template_id && { templateId: schedule.template_id }),
+            report_id: reportId,
+            steps_only: true,
+          });
+        } catch (err) {
+          console.log(`[Schedule ${schedule.id}] Step ${step.step_number} dispatch error: ${err.message}`);
         }
-      } catch (err) {
-        console.log(`[Schedule ${schedule.id}] Steps poll ${attempt + 1} error: ${err.message}`);
+      }));
+
+      // Wait for every step in this batch to settle before moving to the next batch
+      let batchSettled = false;
+      for (let attempt = 0; attempt < 60; attempt++) { // 5 min max per batch
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+          const progressData = await mcpExecute('webhook/check-report-progress', { report_id: reportId });
+          const progressResult = findProgressResult(progressData);
+          if (progressResult && progressResult.steps && progressResult.steps.length > 0) {
+            const settled = batchNums.filter(num => {
+              const s = progressResult.steps.find(s => s.step_number === num);
+              return s && (s.status === 'completed' || s.status === 'error');
+            }).length;
+            console.log(`[Schedule ${schedule.id}] Batch ${batchIdx + 1} poll ${attempt + 1}: ${settled}/${batchNums.length} settled`);
+            if (settled === batchNums.length) { batchSettled = true; break; }
+          } else {
+            console.log(`[Schedule ${schedule.id}] Batch ${batchIdx + 1} poll ${attempt + 1}: no step data yet`);
+          }
+        } catch (err) {
+          console.log(`[Schedule ${schedule.id}] Batch ${batchIdx + 1} poll ${attempt + 1} error: ${err.message}`);
+        }
       }
+      if (!batchSettled) throw new Error(`Batch ${batchIdx + 1} did not settle within 5 minutes`);
     }
-    if (!stepsSettled) throw new Error('Steps did not settle within 5 minutes');
 
     // 5. Trigger formatter — exactly as the frontend does after all batches complete
     console.log(`[Schedule ${schedule.id}] Triggering formatter...`);
