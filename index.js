@@ -2147,6 +2147,140 @@ function findProgressStatus(val) {
   return result?.status;
 }
 
+// ── Plan expansion helpers (mirrors frontend PlanReportPage.tsx logic) ────────
+
+const CHUNK_THRESHOLD = 5000   // trigger: datasets with more rows get chunked
+const DEFAULT_CHUNK_SIZE = 10000 // rows per chunk (matches frontend default)
+
+function wrapSqlWithOffset(sql, chunkSize, offset) {
+  const unescaped = sql.replace(/\\"/g, '"')
+  const flat = unescaped.replace(/\s+/g, ' ').trim()
+  if (/^\s*with\s+/i.test(flat)) return unescaped
+  return `WITH _chunk AS (\n  ${flat}\n)\nSELECT * FROM _chunk ORDER BY 1 LIMIT ${chunkSize} OFFSET ${offset}`
+}
+
+function inferDepsFromSql(step) {
+  if (step.dependencies && step.dependencies.length > 0) return step.dependencies
+  const text = (step.query_strategy?.sql ?? '') + (step.query_strategy?.logic ?? '')
+  const found = []
+  for (let i = 1; i <= 20; i++) {
+    if (text.toLowerCase().includes('step' + i) && !found.includes(i)) found.push(i)
+  }
+  return found.length > 0 ? found : (step.dependencies ?? [])
+}
+
+function expandPlanForLargeDatasets(plan, rowCountMap, threshold = CHUNK_THRESHOLD, chunkSize = DEFAULT_CHUNK_SIZE) {
+  const mergeStepFor = new Map() // old step_number → new representative step_number
+  const newSteps = []
+  let next = 1
+
+  for (const step of plan.steps) {
+    const rowCount = rowCountMap.get(step.dataset_id ?? '') ?? 0
+    const effectiveDeps = inferDepsFromSql(step)
+    const remappedDeps = effectiveDeps
+      .map(d => mergeStepFor.get(d))
+      .filter(n => n !== undefined)
+
+    if (rowCount <= threshold) {
+      const newNum = next++
+      mergeStepFor.set(step.step_number, newNum)
+      newSteps.push({ ...step, step_number: newNum, dependencies: remappedDeps })
+    } else {
+      const numChunks = Math.ceil(rowCount / chunkSize)
+      const chunkNums = []
+      const originalSql = step.query_strategy?.sql ?? ''
+
+      for (let i = 0; i < numChunks; i++) {
+        const chunkNum = next++
+        chunkNums.push(chunkNum)
+        const offset = i * chunkSize
+        const chunkSql = originalSql ? wrapSqlWithOffset(originalSql, chunkSize, offset) : ''
+        newSteps.push({
+          ...step,
+          step_number: chunkNum,
+          dependencies: remappedDeps,
+          purpose: `${step.purpose} (chunk ${i + 1} of ${numChunks})`,
+          query_strategy: {
+            ...step.query_strategy,
+            sql: chunkSql || undefined,
+            logic: `CHUNK ${i + 1} OF ${numChunks} (result rows ${offset + 1}–${offset + chunkSize}):
+The provided SQL wraps the FULL query in a CTE and returns result rows ${offset + 1}–${offset + chunkSize}.
+This means all WHERE filtering and aggregation run first; OFFSET then selects a non-overlapping slice of the final result.
+Each chunk contains distinct result rows — the same row will NOT appear in another chunk.
+If you need to regenerate the SQL, use this pattern — do NOT deviate:
+
+  WITH _chunk AS (
+    <full original query here, including WHERE and GROUP BY>
+  )
+  SELECT * FROM _chunk ORDER BY 1 LIMIT ${chunkSize} OFFSET ${offset}
+
+Do NOT add LIMIT, OFFSET, or WHERE outside the inner query. Return the rows exactly as produced.
+Return raw counts and sums (not percentages or averages) so the merge step can aggregate correctly.
+${step.query_strategy?.logic ?? ''}`,
+          },
+        })
+      }
+
+      const mergeNum = next++
+      mergeStepFor.set(step.step_number, mergeNum)
+      newSteps.push({
+        ...step,
+        step_number: mergeNum,
+        dataset_id: null,
+        dependencies: chunkNums,
+        purpose: `Merge: ${step.purpose}`,
+        query_strategy: {
+          ...step.query_strategy,
+          sql: undefined,
+          logic: `MERGE ONLY — DO NOT run any new database query against the source data.
+The dataset was split into ${numChunks} non-overlapping chunks (steps ${chunkNums.join(', ')}), each covering a distinct OFFSET window with no row appearing in more than one chunk.
+Your job is to consolidate the already-returned chunk results into one final answer for: ${step.purpose}
+
+DUPLICATE SCAN DETECTION (check this first, before any summing):
+Compare the per-group values across all chunks. If every chunk returns the same or nearly identical values for every group (within 2%), it means the chunk SQL did not apply the OFFSET correctly and each chunk scanned the full dataset.
+In that case: use ONLY the values from chunk 1 (step ${chunkNums[0]}) as the final result — do NOT sum across chunks.
+If chunks have clearly different per-group values, proceed with the aggregation rules below.
+
+Aggregation rules (when chunks have different values):
+- COUNTS / TOTALS: add the values from each chunk (e.g. chunk1_count + chunk2_count + ...).
+- SUMS: add the sums from each chunk.
+- AVERAGES / MEANS: compute as (sum of all chunk sums) / (sum of all chunk counts) — never average the per-chunk averages.
+- PERCENTAGES / RATES: recompute from the merged totals — never average per-chunk percentages.
+- GROUP-BY results: union the rows from all chunks; if the same group key appears in multiple chunks, SUM their counts/totals and recompute derived metrics.
+- TOP-N / RANKINGS: re-rank after merging all group totals.`,
+        },
+      })
+    }
+  }
+
+  // Rewrite step{N} references in SQL/logic so downstream steps reference correct new numbers.
+  // Sort descending to avoid "step1" matching inside "step10".
+  const sortedMappings = [...mergeStepFor.entries()]
+    .filter(([oldNum, newNum]) => oldNum !== newNum)
+    .sort((a, b) => b[0] - a[0])
+
+  if (sortedMappings.length > 0) {
+    for (const step of newSteps) {
+      const qs = step.query_strategy
+      if (!qs) continue
+      let sql = qs.sql ?? ''
+      let logic = qs.logic ?? ''
+      for (const [oldNum, newNum] of sortedMappings) {
+        const re = new RegExp('\\bstep' + oldNum + '\\b', 'gi')
+        sql = sql.replace(re, 'step' + newNum)
+        logic = logic.replace(re, 'step' + newNum)
+      }
+      if (sql !== (qs.sql ?? '') || logic !== (qs.logic ?? '')) {
+        step.query_strategy = { ...qs, sql: sql || undefined, logic: logic || undefined }
+      }
+    }
+  }
+
+  return { ...plan, total_steps: newSteps.length, steps: newSteps }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function executeScheduledReport(schedule, client) {
   try {
     // 1. Load original conversation — reuse saved report_plan to skip re-planning
@@ -2185,11 +2319,38 @@ async function executeScheduledReport(schedule, client) {
       console.log(`[Schedule ${schedule.id}] Re-planned successfully: ${plan.steps.length} steps`);
     }
 
-    // 2. Generate report_id the same way the frontend does
+    // 2. Fetch dataset row counts and expand the plan for large datasets (mirrors frontend logic)
+    const datasetIds = plan.steps
+      .map(s => s.dataset_id)
+      .filter(id => id && id !== 'null')
+    const rowCountMap = new Map()
+    if (datasetIds.length > 0) {
+      try {
+        const uniqueIds = [...new Set(datasetIds)]
+        const rcResult = await client.query(
+          `SELECT dataset_id::text, row_count FROM n8n_data.dataset_record_manager WHERE dataset_id::text = ANY($1)`,
+          [uniqueIds]
+        )
+        for (const row of rcResult.rows) {
+          if (row.row_count != null) rowCountMap.set(row.dataset_id, row.row_count)
+        }
+        console.log(`[Schedule ${schedule.id}] Row counts fetched: ${JSON.stringify(Object.fromEntries(rowCountMap))}`)
+      } catch (err) {
+        console.log(`[Schedule ${schedule.id}] Warning: could not fetch row counts — skipping expansion: ${err.message}`)
+      }
+    }
+    const needsExpansion = [...rowCountMap.values()].some(rc => rc > CHUNK_THRESHOLD)
+    if (needsExpansion) {
+      const before = plan.steps.length
+      plan = expandPlanForLargeDatasets(plan, rowCountMap)
+      console.log(`[Schedule ${schedule.id}] Plan expanded: ${before} → ${plan.steps.length} steps (chunking applied)`)
+    }
+
+    // 3. Generate report_id the same way the frontend does
     const reportId = 'rpt_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8);
     console.log(`[Schedule ${schedule.id}] report_id=${reportId}, steps=${plan.steps.length}`);
 
-    // 3. Execute each step individually with steps_only=true — exactly as the frontend does
+    // 4. Execute each step individually with steps_only=true — exactly as the frontend does
     //    Steps run sequentially for simplicity (frontend runs them in dependency batches)
     for (const step of plan.steps) {
       console.log(`[Schedule ${schedule.id}] Executing step ${step.step_number}: ${step.purpose}`);
@@ -2208,7 +2369,7 @@ async function executeScheduledReport(schedule, client) {
       }
     }
 
-    // 4. Poll check-report-progress until all steps settle (completed or error)
+    // 5. Poll check-report-progress until all steps settle (completed or error)
     console.log(`[Schedule ${schedule.id}] Waiting for steps to settle...`);
     const stepNumbers = plan.steps.map(s => s.step_number);
     let stepsSettled = false;
