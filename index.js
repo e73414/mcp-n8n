@@ -2185,7 +2185,13 @@ function expandPlanForLargeDatasets(plan, rowCountMap, threshold = CHUNK_THRESHO
       .map(d => mergeStepFor.get(d))
       .filter(n => n !== undefined)
 
-    if (rowCount <= threshold) {
+    // Don't chunk aggregated queries — GROUP BY collapses the result set to a
+    // fraction of the source rows, so chunking adds merge complexity for no gain
+    // and the AI-generated merge SQL (FULL OUTER JOIN × N) is fragile.
+    const sql = step.query_strategy?.sql ?? ''
+    const isAggregated = /\bgroup\s+by\b/i.test(sql)
+
+    if (rowCount <= threshold || isAggregated) {
       const newNum = next++
       mergeStepFor.set(step.step_number, newNum)
       newSteps.push({ ...step, step_number: newNum, dependencies: remappedDeps })
