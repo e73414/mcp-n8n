@@ -3507,6 +3507,95 @@ app.get('/ingestion/schedules', async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// POST /ai-analyze — AI-powered CSV/Excel data quality review
+const AI_ANALYZE_MODEL = process.env.AI_ANALYZE_MODEL || 'deepseek/deepseek-chat';
+const _AI_ANALYZE_API_BASE = process.env.AI_ANALYZE_API_URL || 'https://openrouter.ai/api/v1/chat/completions';
+const AI_ANALYZE_API_URL = _AI_ANALYZE_API_BASE.endsWith('/chat/completions')
+  ? _AI_ANALYZE_API_BASE
+  : _AI_ANALYZE_API_BASE.replace(/\/$/, '') + '/chat/completions';
+const AI_ANALYZE_API_KEY = process.env.AI_ANALYZE_API_KEY || process.env.OPENROUTER_API_KEY;
+
+app.post('/ai-analyze', async (req, res) => {
+  if (!AI_ANALYZE_API_KEY) return res.status(503).json({ error: 'AI analysis not configured' });
+
+  const { fileName, headers, firstRows, lastRows, dataBlocks, rowCount, columnCount, profile, existingIssues, userInstructions } = req.body;
+
+  // Truncate cell values to keep prompt compact
+  const truncCell = (v) => String(v ?? '').slice(0, 50);
+  const truncRow = (r) => (r || []).map(truncCell);
+
+  const headerLine = (headers || []).slice(0, 30).join(',');
+  const firstCsv = (firstRows || []).slice(0, 10).map(r => truncRow(r).join(',')).join('\n');
+  const lastCsv = (lastRows || []).slice(0, 5).map(r => truncRow(r).join(',')).join('\n');
+  const profileSummary = (profile?.columns || []).slice(0, 20).map(c => ({
+    name: c.original_name, type: c.inferred_type,
+    nulls: c.null_count, unique: c.unique_count,
+    samples: (c.sample_values || []).slice(0, 2).map(truncCell)
+  }));
+
+  const blocksDesc = (dataBlocks || []).length > 1
+    ? `\nDATA BLOCKS SEPARATED BY EMPTY ROWS (${dataBlocks.length} blocks found):\n` +
+      dataBlocks.map((b, i) =>
+        `Block ${i + 1} (rows ${b.startRow}–${b.endRow}, ${b.rowCount} rows):\n${(b.sampleRows || []).slice(0, 3).map(r => truncRow(r).join(',')).join('\n')}`
+      ).join('\n\n')
+    : '';
+
+  const userMsg = `File: ${fileName} | Total rows: ${rowCount} | Columns: ${columnCount}
+${userInstructions ? `User context: ${userInstructions}` : ''}
+COLUMN PROFILE: ${JSON.stringify(profileSummary)}
+HEADERS: ${headerLine}
+FIRST 10 ROWS:\n${firstCsv}
+LAST 5 ROWS:\n${lastCsv}${blocksDesc}
+ALREADY DETECTED BY RULE-BASED ANALYSIS (do not repeat): ${(existingIssues || []).join('; ')}
+
+Analyze for these issues:
+1. DATA ISLANDS: Isolated secondary tables separated from main data by empty rows — e.g., a summary table, metadata block, or footnote table below the main data. If multiple data blocks exist, identify which is the main data and which should be excluded.
+2. Totals/subtotal rows embedded within data rows (e.g., "Subtotal", "Grand Total" appearing as a data row)
+3. Footer rows at the bottom (grand totals, "Source:", "Notes:", report signatures)
+4. Mid-file repeated header rows (column names appearing again as a data row)
+5. Date format ambiguity (e.g., 01/02/03 — is it MM/DD/YY, DD/MM/YY, or YY/MM/DD?)
+6. Mixed currencies within a single column
+7. Composite columns that should be split (full names, full addresses)
+8. First row appears to be data, not a header
+9. Near-duplicate column names
+10. Encoding artifacts (garbled/replacement characters)
+11. Unit inconsistency within a column (some values in thousands, others not)
+
+Return ONLY this JSON (no markdown, no explanation):
+{"issues":[{"type":"data_island|totals_row|footer_rows|mid_file_header|date_ambiguity|mixed_currency|composite_column|data_as_header|near_duplicate_columns|encoding_artifact|unit_inconsistency|other","severity":"critical|warning|info","columns":[],"rows":[],"description":"","suggested_fix":"","auto_applicable":false}],"column_suggestions":[{"original":"","suggested_name":"","suggested_type":"","date_format":"","confidence":"high|medium|low","reason":""}],"rows_to_exclude":[],"blocks_to_exclude":[1],"summary":""}`;
+
+  try {
+    const resp = await axios.post(AI_ANALYZE_API_URL, {
+      model: AI_ANALYZE_MODEL,
+      max_tokens: 1024,
+      messages: [
+        { role: 'user', content: 'You are a data quality analyst. Analyze CSV/Excel data for issues that cause SQL import problems. Return ONLY valid JSON with no markdown or explanation.\n\n' + userMsg }
+      ]
+    }, {
+      headers: {
+        'Authorization': `Bearer ${AI_ANALYZE_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 120000
+    });
+    const text = resp.data.choices[0].message.content;
+    console.log('[ai-analyze] raw response:', text.slice(0, 300));
+    const match = text.match(/```json\n?([\s\S]*?)\n?```/) || text.match(/(\{[\s\S]*\})/);
+    const jsonStr = match ? match[1] : text;
+    try {
+      res.json(JSON.parse(jsonStr));
+    } catch (parseErr) {
+      console.error('[ai-analyze] JSON parse failed. Raw text:', text.slice(0, 500));
+      res.status(500).json({ error: 'AI returned invalid JSON', detail: parseErr.message, raw: text.slice(0, 200) });
+    }
+  } catch (err) {
+    console.error('[ai-analyze] request failed:', err.message, err.response?.data);
+    res.status(500).json({ error: 'AI analysis failed', detail: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 app.get('/', (req, res) => res.send('mcp-n8n server running'));
 
 app.listen(PORT, () => {
