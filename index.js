@@ -3518,7 +3518,7 @@ const AI_ANALYZE_API_KEY = process.env.AI_ANALYZE_API_KEY || process.env.OPENROU
 app.post('/ai-analyze', async (req, res) => {
   if (!AI_ANALYZE_API_KEY) return res.status(503).json({ error: 'AI analysis not configured' });
 
-  const { fileName, headers, firstRows, lastRows, dataBlocks, rowCount, columnCount, profile, existingIssues, userInstructions } = req.body;
+  const { fileName, headers, firstRows, lastRows, dataBlocks, rowCount, columnCount, profile, existingIssues, userInstructions, rawFirstRows } = req.body;
 
   // Truncate cell values to keep prompt compact
   const truncCell = (v) => String(v ?? '').slice(0, 50);
@@ -3527,6 +3527,7 @@ app.post('/ai-analyze', async (req, res) => {
   const headerLine = (headers || []).slice(0, 30).join(',');
   const firstCsv = (firstRows || []).slice(0, 10).map(r => truncRow(r).join(',')).join('\n');
   const lastCsv = (lastRows || []).slice(0, 5).map(r => truncRow(r).join(',')).join('\n');
+  const rawFirstCsv = (rawFirstRows || []).slice(0, 20).map(r => truncRow(r).join(',')).join('\n');
   const profileSummary = (profile?.columns || []).slice(0, 20).map(c => ({
     name: c.original_name, type: c.inferred_type,
     nulls: c.null_count, unique: c.unique_count,
@@ -3546,6 +3547,7 @@ COLUMN PROFILE: ${JSON.stringify(profileSummary)}
 HEADERS: ${headerLine}
 FIRST 10 ROWS:\n${firstCsv}
 LAST 5 ROWS:\n${lastCsv}${blocksDesc}
+RAW FIRST 20 ROWS (before header normalisation — use for compound header detection):\n${rawFirstCsv}
 ALREADY DETECTED BY RULE-BASED ANALYSIS (do not repeat): ${(existingIssues || []).join('; ')}
 
 Analyze for these issues:
@@ -3560,14 +3562,16 @@ Analyze for these issues:
 9. Near-duplicate column names
 10. Encoding artifacts (garbled/replacement characters)
 11. Unit inconsistency within a column (some values in thousands, others not)
+12. COMPOUND HEADERS: Inspect rawFirstRows for multi-row compound headers — e.g. "Revenue" in row 0 spanning "2024", "2025", "2026" in row 1. Merge using underscore separator (Revenue_2024, Revenue_2025, Revenue_2026). source_rows are 0-based indices into rawFirstRows. merged_headers must cover ALL columns. If no compound headers found, return header_merges as [].
+13. SPATIAL DATA ISLANDS: Identify rectangular regions spatially disconnected from the main dataset body — summary totals tables, footnotes formatted as mini-tables, embedded crosstabs. start_row/end_row are 0-based indices relative to data rows (not counting the header row). start_col/end_col are 0-based column indices. Include a plain-English reason for each. If none found, return data_islands as [].
 
 Return ONLY this JSON (no markdown, no explanation):
-{"issues":[{"type":"data_island|totals_row|footer_rows|mid_file_header|date_ambiguity|mixed_currency|composite_column|data_as_header|near_duplicate_columns|encoding_artifact|unit_inconsistency|other","severity":"critical|warning|info","columns":[],"rows":[],"description":"","suggested_fix":"","auto_applicable":false}],"column_suggestions":[{"original":"","suggested_name":"","suggested_type":"","date_format":"","confidence":"high|medium|low","reason":""}],"rows_to_exclude":[],"blocks_to_exclude":[1],"summary":""}`;
+{"issues":[{"type":"data_island|totals_row|footer_rows|mid_file_header|date_ambiguity|mixed_currency|composite_column|data_as_header|near_duplicate_columns|encoding_artifact|unit_inconsistency|other","severity":"critical|warning|info","columns":[],"rows":[],"description":"","suggested_fix":"","auto_applicable":false}],"column_suggestions":[{"original":"","suggested_name":"","suggested_type":"","date_format":"","confidence":"high|medium|low","reason":""}],"rows_to_exclude":[],"blocks_to_exclude":[1],"summary":"","header_merges":[{"source_rows":[0,1],"merged_headers":["Col_2024","Col_2025"]}],"data_islands":[{"start_row":45,"end_row":52,"start_col":0,"end_col":3,"reason":"Summary totals table unrelated to main dataset body"}]}`;
 
   try {
     const resp = await axios.post(AI_ANALYZE_API_URL, {
       model: AI_ANALYZE_MODEL,
-      max_tokens: 1024,
+      max_tokens: 2048,
       messages: [
         { role: 'user', content: 'You are a data quality analyst. Analyze CSV/Excel data for issues that cause SQL import problems. Return ONLY valid JSON with no markdown or explanation.\n\n' + userMsg }
       ]
@@ -3576,17 +3580,45 @@ Return ONLY this JSON (no markdown, no explanation):
         'Authorization': `Bearer ${AI_ANALYZE_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      timeout: 120000
+      timeout: 180000
     });
     const text = resp.data.choices[0].message.content;
-    console.log('[ai-analyze] raw response:', text.slice(0, 300));
-    const match = text.match(/```json\n?([\s\S]*?)\n?```/) || text.match(/(\{[\s\S]*\})/);
-    const jsonStr = match ? match[1] : text;
-    try {
-      res.json(JSON.parse(jsonStr));
-    } catch (parseErr) {
-      console.error('[ai-analyze] JSON parse failed. Raw text:', text.slice(0, 500));
-      res.status(500).json({ error: 'AI returned invalid JSON', detail: parseErr.message, raw: text.slice(0, 200) });
+    console.log('[ai-analyze] raw response:', text.slice(0, 400));
+
+    // Robust JSON extraction:
+    // 1. Try markdown code block (```json or ```)
+    // 2. Use brace-counting to find the exact JSON object (avoids greedy-regex
+    //    capturing trailing garbage like "Note: {see above}")
+    // 3. Strip trailing commas before } or ] (common LLM mistake)
+    function extractJson(raw) {
+      // Try code block first
+      const block = raw.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+      if (block) {
+        try { return JSON.parse(block[1]); } catch {}
+        try { return JSON.parse(block[1].replace(/,(\s*[}\]])/g, '$1')); } catch {}
+      }
+      // Find JSON object via brace counting
+      const start = raw.indexOf('{');
+      if (start === -1) return null;
+      let depth = 0, end = -1;
+      for (let i = start; i < raw.length; i++) {
+        if (raw[i] === '{') depth++;
+        else if (raw[i] === '}') { depth--; if (depth === 0) { end = i; break; } }
+      }
+      if (end === -1) return null;
+      const candidate = raw.slice(start, end + 1);
+      try { return JSON.parse(candidate); } catch {}
+      // Clean trailing commas and retry
+      try { return JSON.parse(candidate.replace(/,(\s*[}\]])/g, '$1')); } catch {}
+      return null;
+    }
+
+    const parsed = extractJson(text);
+    if (parsed) {
+      res.json(parsed);
+    } else {
+      console.error('[ai-analyze] JSON extraction failed. Raw text:', text.slice(0, 600));
+      res.status(500).json({ error: 'AI returned invalid JSON', detail: 'Could not extract valid JSON from response', raw: text.slice(0, 300) });
     }
   } catch (err) {
     console.error('[ai-analyze] request failed:', err.message, err.response?.data);
