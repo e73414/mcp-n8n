@@ -3135,6 +3135,28 @@ app.delete('/ingestion/schedule/:datasetId', async (req, res) => {
   } finally { client.release(); }
 });
 
+app.delete('/datasets/:datasetId/cleanup', async (req, res) => {
+  const { datasetId } = req.params;
+  const client = await pgPool.connect();
+  try {
+    unscheduleJob(datasetId);
+    await client.query('BEGIN');
+    await client.query('DELETE FROM n8n_data.dataset_ingestion_schedule WHERE dataset_id=$1', [datasetId]);
+    await client.query('DELETE FROM n8n_data.dataset_ingestion_config WHERE dataset_id=$1', [datasetId]);
+    await client.query('DELETE FROM n8n_data.dataset_ingestion_files WHERE dataset_id=$1', [datasetId]);
+    await client.query(
+      "DELETE FROM n8n_data.report_schedules WHERE ',' || dataset_ids || ',' LIKE '%,' || $1 || ',%'",
+      [datasetId]
+    );
+    await client.query('DELETE FROM n8n_data.saved_questions WHERE dataset_id=$1', [datasetId]);
+    await client.query('COMMIT');
+    res.json({ status: 'ok' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.post('/ingestion/run/:datasetId', async (req, res) => {
   const { datasetId } = req.params;
   const { email } = req.body;
