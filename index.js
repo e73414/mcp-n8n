@@ -378,7 +378,7 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
 // Returns a random sample of rows from a dataset (replaces n8n "Get Dataset Preview" workflow).
 app.get('/datasets/:datasetId/preview', async (req, res) => {
   const { datasetId } = req.params;
-  const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+  const limit = Math.min(parseInt(req.query.limit) || 20, 100);
   const client = await pgPool.connect();
   try {
     const result = await client.query(
