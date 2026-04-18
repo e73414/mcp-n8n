@@ -375,6 +375,25 @@ app.get('/dataset-view/:datasetId', async (req, res) => {
   }
 });
 
+// Returns a random sample of rows from a dataset (replaces n8n "Get Dataset Preview" workflow).
+app.get('/datasets/:datasetId/preview', async (req, res) => {
+  const { datasetId } = req.params;
+  const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `SELECT * FROM n8n_data.universal_datatable WHERE dataset_id = $1 ORDER BY RANDOM() LIMIT $2`,
+      [datasetId, limit]
+    );
+    const columns = result.fields.map(f => f.name);
+    const rows = result.rows;
+    res.json({ columns, rows });
+  } catch (err) {
+    console.error('GET /datasets/:id/preview error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // Return step results metadata for a saved report (used when loading from history).
 app.get('/reports/:reportId/steps', async (req, res) => {
   const { reportId } = req.params;
@@ -1033,6 +1052,55 @@ app.delete('/ai-models/:id', async (req, res) => {
     res.status(204).send();
   } catch (err) {
     console.error('DELETE /ai-models/:id error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// ── Report Templates ────────────────────────────────────────────────────────────
+
+// List report templates accessible to a user (public + owned).
+// Replaces n8n "List Templates" workflow.
+app.get('/templates', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `SELECT template_id,
+              template_name AS title,
+              template_desc AS description,
+              html AS html_content,
+              owner_email,
+              CASE WHEN template_access = 'public' THEN true ELSE false END AS is_public
+       FROM n8n_data."data-analyzer-report-templates"
+       WHERE template_access = 'public' OR owner_email = $1
+       ORDER BY template_name`,
+      [email]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('GET /templates error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Delete a report template (ownership verified). Replaces n8n "Delete Template" workflow.
+app.delete('/templates/:templateId', async (req, res) => {
+  const { templateId } = req.params;
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      `DELETE FROM n8n_data."data-analyzer-report-templates"
+       WHERE template_id = $1 AND owner_email = $2
+       RETURNING template_id`,
+      [templateId, email]
+    );
+    if (result.rowCount === 0) return res.status(404).json({ error: 'Template not found or not owned by user' });
+    res.json({ deleted: true });
+  } catch (err) {
+    console.error('DELETE /templates/:id error:', err.message);
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
