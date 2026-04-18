@@ -394,6 +394,118 @@ app.get('/datasets/:datasetId/preview', async (req, res) => {
   } finally { client.release(); }
 });
 
+// Replaces webhook/delete-dataset — full cascade delete including data rows and view.
+app.delete('/datasets/:datasetId', async (req, res) => {
+  const { datasetId } = req.params;
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  if (!/^[a-zA-Z0-9_-]+$/.test(datasetId))
+    return res.status(400).json({ error: 'Invalid dataset ID' });
+
+  const client = await pgPool.connect();
+  try {
+    const admin = await isAdmin(email, client);
+    const dsRow = await client.query(
+      'SELECT dataset_name, owner_email FROM n8n_data.dataset_record_manager WHERE dataset_id=$1',
+      [datasetId]
+    );
+    if (dsRow.rowCount === 0) return res.status(404).json({ error: 'Dataset not found' });
+    if (!admin && dsRow.rows[0].owner_email !== email)
+      return res.status(403).json({ error: 'Forbidden' });
+
+    const datasetName = dsRow.rows[0].dataset_name;
+    const viewName = `v_ds_${datasetId.replace(/-/g, '_')}`;
+
+    unscheduleJob(datasetId);
+    await client.query('BEGIN');
+    await client.query('DELETE FROM n8n_data.dataset_ingestion_schedule WHERE dataset_id=$1', [datasetId]);
+    await client.query('DELETE FROM n8n_data.dataset_ingestion_config WHERE dataset_id=$1', [datasetId]);
+    await client.query('DELETE FROM n8n_data.dataset_ingestion_files WHERE dataset_id=$1', [datasetId]);
+    await client.query(
+      "DELETE FROM n8n_data.report_schedules WHERE ',' || dataset_ids || ',' LIKE '%,' || $1 || ',%'",
+      [datasetId]
+    );
+    await client.query('DELETE FROM n8n_data.saved_questions WHERE dataset_id=$1', [datasetId]);
+    await client.query('DELETE FROM n8n_data.template_profiles WHERE template_id=$1', [datasetId]);
+    await client.query('DELETE FROM n8n_data.universal_datatable WHERE dataset_id=$1', [datasetId]);
+    await client.query(`DROP VIEW IF EXISTS n8n_data."${viewName}"`);
+    await client.query('DELETE FROM n8n_data.dataset_record_manager WHERE dataset_id=$1', [datasetId]);
+    await client.query('COMMIT');
+
+    res.json({ status: 'ok', datasetName, message: 'Dataset deleted successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Replaces webhook/get-dataset-detail — full DatasetDetail shape with profile-based auth.
+app.get('/datasets/:datasetId/detail', async (req, res) => {
+  const { datasetId } = req.params;
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+
+  const client = await pgPool.connect();
+  try {
+    if (!(await canAccessDataset(client, email, datasetId)))
+      return res.status(403).json({ error: 'Forbidden' });
+
+    const r = await client.query(`
+      SELECT d.*, tp.profile_code
+      FROM n8n_data.dataset_record_manager d
+      LEFT JOIN n8n_data.template_profiles tp ON tp.template_id = d.dataset_id::text
+      WHERE d.dataset_id = $1
+    `, [datasetId]);
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Dataset not found' });
+
+    const row = r.rows[0];
+    res.json({
+      id: row.dataset_id,
+      name: row.dataset_name,
+      summary: row.dataset_summary,
+      column_mapping: row.column_mapping,
+      dataset_desc: row.dataset_desc,
+      sample_questions: row.sample_questions,
+      owner_email: row.owner_email,
+      created: row.created_at,
+      updated: row.updated_at,
+      row_count: row.row_count,
+      dataset_headers: row.dataset_headers,
+      dataset_header_types: row.dataset_header_types,
+      column_dictionary: row.column_dictionary,
+      profile_code: row.profile_code ?? null,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// Replaces webhook/update-summary — updates dataset_summary, dataset_name, dataset_desc.
+app.patch('/datasets/:datasetId/summary', async (req, res) => {
+  const { datasetId } = req.params;
+  const { email, summary, dataset_desc, dataset_name } = req.body;
+  if (!email || summary == null) return res.status(400).json({ error: 'email and summary required' });
+
+  const client = await pgPool.connect();
+  try {
+    const admin = await isAdmin(email, client);
+    const r = await client.query(
+      `UPDATE n8n_data.dataset_record_manager
+       SET dataset_summary = $1,
+           dataset_desc    = COALESCE($2, dataset_desc),
+           dataset_name    = COALESCE($3, dataset_name),
+           updated_at      = now()
+       WHERE dataset_id = $4 AND ($5 OR owner_email = $6)
+       RETURNING dataset_id`,
+      [summary, dataset_desc ?? null, dataset_name ?? null, datasetId, admin, email]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ error: 'Dataset not found or forbidden' });
+    res.json({ status: 'ok' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 // Return step results metadata for a saved report (used when loading from history).
 app.get('/reports/:reportId/steps', async (req, res) => {
   const { reportId } = req.params;
