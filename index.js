@@ -660,6 +660,23 @@ app.get('/datasets/:datasetId/download-csv', async (req, res) => {
 
 // ── Users ────────────────────────────────────────────────────────────────────
 
+app.get('/user-prompt', async (req, res) => {
+  const { email } = req.query;
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const client = await pgPool.connect();
+  try {
+    const result = await client.query(
+      'SELECT mcp_answers_user_prompt FROM n8n_data.users WHERE user_email = $1 LIMIT 1',
+      [email]
+    );
+    const prompt = result.rows[0]?.mcp_answers_user_prompt ?? null;
+    res.json({ user_prompt: prompt });
+  } catch (err) {
+    console.error('GET /user-prompt error:', err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
 app.get('/users', async (req, res) => {
   const { email } = req.query;
   if (!email) return res.status(400).json({ error: 'email required' });
@@ -679,7 +696,7 @@ app.get('/users', async (req, res) => {
 
 app.patch('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { password_hash, template_id, profile, user_timezone, profiles, user_email, actor_email } = req.body;
+  const { password_hash, template_id, profile, user_timezone, profiles, user_email, actor_email, mcp_answers_user_prompt } = req.body;
   if (!actor_email) return res.status(400).json({ error: 'actor_email required' });
   const client = await pgPool.connect();
   try {
@@ -699,6 +716,12 @@ app.patch('/users/:id', async (req, res) => {
     if (profile        !== undefined) { fields.push(`profile = $${fields.length + 1}`);         values.push(profile); }
     if (user_timezone  !== undefined) { fields.push(`user_timezone = $${fields.length + 1}`);   values.push(user_timezone); }
     if (profiles       !== undefined) { fields.push(`profiles = $${fields.length + 1}`);        values.push(Array.isArray(profiles) ? profiles : []); }
+    if (mcp_answers_user_prompt !== undefined) {
+      if (mcp_answers_user_prompt !== null && mcp_answers_user_prompt.length > 1000)
+        return res.status(400).json({ error: 'mcp_answers_user_prompt exceeds 1000 character limit' });
+      fields.push(`mcp_answers_user_prompt = $${fields.length + 1}`);
+      values.push(mcp_answers_user_prompt || null);
+    }
     if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
     values.push(id);
     const result = await client.query(
