@@ -277,3 +277,8 @@ VALUES
   ('Admin: Templates', '/admin/templates', 102, false),
   ('App Settings',     '/admin/settings',   95, true)
 ON CONFLICT DO NOTHING;
+
+
+-- Add user personal MCP Answers context
+ALTER TABLE n8n_data.users
+  ADD COLUMN IF NOT EXISTS mcp_answers_user_prompt TEXT;
