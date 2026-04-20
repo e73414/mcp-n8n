@@ -732,18 +732,19 @@ app.get('/conversations', async (req, res) => {
 
 app.post('/conversations', async (req, res) => {
   const { user_email, prompt, response, ai_model, dataset_id, dataset_name,
-          duration_seconds, report_plan, report_id, detail_level, report_detail, created_at } = req.body;
+          duration_seconds, report_plan, report_id, detail_level, report_detail, created_at, source } = req.body;
   const client = await pgPool.connect();
   try {
     const result = await client.query(
       `INSERT INTO n8n_data.conversation_history
          (user_email, prompt, response, ai_model, dataset_id, dataset_name,
-          duration_seconds, report_plan, report_id, detail_level, report_detail, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+          duration_seconds, report_plan, report_id, detail_level, report_detail, created_at, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
       [user_email, prompt, response, ai_model, dataset_id, dataset_name,
        duration_seconds ?? null, report_plan ?? null, report_id ?? null,
        detail_level ?? null, report_detail ?? null,
-       created_at || new Date().toISOString()]
+       created_at || new Date().toISOString(),
+       source || 'analyze']
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
@@ -1546,16 +1547,17 @@ app.put('/app-settings/:key', async (req, res) => {
 // ── Saved Questions ───────────────────────────────────────────────────────────
 
 app.post('/saved-questions', async (req, res) => {
-  const { prompt, dataset_id, dataset_name, ai_model, editable, audience, owner_email } = req.body;
-  if (!prompt || !dataset_id || !dataset_name || !ai_model || !owner_email)
-    return res.status(400).json({ error: 'prompt, dataset_id, dataset_name, ai_model, owner_email required' });
+  const { prompt, dataset_id, dataset_name, ai_model, editable, audience, owner_email, source } = req.body;
+  const effectiveSource = source || 'analyze';
+  if (!prompt || !ai_model || !owner_email)
+    return res.status(400).json({ error: 'prompt, ai_model, owner_email required' });
   const client = await pgPool.connect();
   try {
     const result = await client.query(
       `INSERT INTO n8n_data.saved_questions
-         (prompt, dataset_id, dataset_name, ai_model, editable, audience, owner_email)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [prompt, dataset_id, dataset_name, ai_model, editable ?? true, audience ?? [], owner_email]
+         (prompt, dataset_id, dataset_name, ai_model, editable, audience, owner_email, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+      [prompt, dataset_id || null, dataset_name || null, ai_model, editable ?? true, audience ?? [], owner_email, effectiveSource]
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {

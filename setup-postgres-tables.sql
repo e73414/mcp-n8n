@@ -24,8 +24,11 @@ CREATE TABLE IF NOT EXISTS n8n_data.conversation_history (
   report_id        TEXT,
   detail_level     TEXT,
   report_detail    TEXT,
+  source           TEXT DEFAULT 'analyze',
   created_at       TIMESTAMPTZ DEFAULT now()
 );
+-- Migration for existing installs:
+ALTER TABLE n8n_data.conversation_history ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'analyze';
 CREATE INDEX IF NOT EXISTS idx_conv_user_email ON n8n_data.conversation_history (user_email);
 CREATE INDEX IF NOT EXISTS idx_conv_created_at  ON n8n_data.conversation_history (created_at DESC);
 
@@ -141,6 +144,7 @@ CREATE TABLE IF NOT EXISTS n8n_data.saved_questions (
   editable     BOOLEAN NOT NULL DEFAULT true,
   audience     TEXT[],          -- NULL/empty = anyone with link; set = restricted to those emails
   owner_email  TEXT NOT NULL,
+  source       TEXT NOT NULL DEFAULT 'analyze',  -- 'analyze' | 'mcp_answers'
   created_at   TIMESTAMPTZ DEFAULT now(),
   updated_at   TIMESTAMPTZ DEFAULT now()
 );
