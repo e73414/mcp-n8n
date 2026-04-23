@@ -1714,7 +1714,12 @@ async function getValidAccessToken(email, client) {
   oauth2Client.setCredentials({ access_token, refresh_token });
   // Refresh if expired or expiring within 5 minutes
   if (!token_expiry || new Date(token_expiry) < new Date(Date.now() + 5 * 60 * 1000)) {
-    const { credentials } = await oauth2Client.refreshAccessToken();
+    let credentials;
+    try {
+      ({ credentials } = await oauth2Client.refreshAccessToken());
+    } catch (refreshErr) {
+      throw new Error('Google connection expired — please disconnect and reconnect your Google account');
+    }
     await client.query(
       `UPDATE n8n_data.google_oauth_tokens
        SET access_token=$1, token_expiry=$2, updated_at=now()
