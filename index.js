@@ -3750,7 +3750,7 @@ const AI_ANALYZE_API_KEY = process.env.AI_ANALYZE_API_KEY || process.env.OPENROU
 app.post('/ai-analyze', async (req, res) => {
   if (!AI_ANALYZE_API_KEY) return res.status(503).json({ error: 'AI analysis not configured' });
 
-  const { fileName, headers, firstRows, lastRows, dataBlocks, rowCount, columnCount, profile, existingIssues, userInstructions, rawFirstRows } = req.body;
+  const { fileName, headers, firstRows, lastRows, dataBlocks, rowCount, columnCount, profile, existingIssues, userInstructions, rawFirstRows, model: requestModel } = req.body;
 
   // Truncate cell values to keep prompt compact
   const truncCell = (v) => String(v ?? '').slice(0, 50);
@@ -3802,7 +3802,7 @@ Return ONLY this JSON (no markdown, no explanation):
 
   try {
     const resp = await axios.post(AI_ANALYZE_API_URL, {
-      model: AI_ANALYZE_MODEL,
+      model: requestModel || AI_ANALYZE_MODEL,
       max_tokens: 2048,
       messages: [
         { role: 'user', content: 'You are a data quality analyst. Analyze CSV/Excel data for issues that cause SQL import problems. Return ONLY valid JSON with no markdown or explanation.\n\n' + userMsg }
